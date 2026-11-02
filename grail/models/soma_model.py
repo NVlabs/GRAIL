@@ -175,53 +175,12 @@ _SOMA_SEGMENT_VERTEX_CACHE = {}
 
 
 def setup_soma_model(model_path=None, device="cuda"):
-    """
-    Initialize and return the SOMA body model (hybrid version).
-
-    Args:
-        model_path: Path to the SOMA model data root directory or checkpoint.
-                    If a full .pt path is given, the parent directory is used as data_root.
-        device: Device to load the model on ("cuda" or "cpu")
-
-    Returns:
-        NovaLayer_hybrid: Initialized SOMA model
-    """
-    if model_path is None:
-        raise ValueError("model_path is required. Set soma_model_path in the config YAML.")
-
-    # Use GEM-SOMA's SomaLayer wrapper which handles the SOMALayer API correctly
-    import importlib.util
-    import os
-    import sys
-
-    _soma_layer_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "imports",
-        "GEM-SOMA",
-        "gem",
-        "utils",
-        "soma_utils",
-        "soma_layer.py",
+    """Refuse the retired hybrid MHR runtime rather than reinterpret its motion."""
+    raise ValueError(
+        "The legacy MHR-backed soma runtime is retired. Use the archived code for "
+        "historical checkpoints; new reconstruction uses soma03 with GEM-X/SOMA-X. "
+        "Changing only the model tag is not a valid checkpoint conversion."
     )
-    spec = importlib.util.spec_from_file_location("_soma_layer", _soma_layer_path)
-    _soma_layer_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(_soma_layer_mod)
-    SomaLayer = _soma_layer_mod.SomaLayer
-
-    # Accept either data_root dir, a full .pt path, or None (auto-download)
-    data_root = None
-    if model_path and os.path.exists(model_path):
-        if model_path.endswith(".pt"):
-            data_root = os.path.dirname(model_path)
-        else:
-            data_root = model_path
-    soma_model = SomaLayer(
-        data_root=data_root, low_lod=True, device=device, identity_model_type="mhr", mode="warp"
-    )
-    soma_model.to(device)
-    return soma_model
 
 
 def load_soma_beta(beta_path, device="cuda"):
@@ -523,17 +482,6 @@ def get_soma_verts_segment(soma_verts, segment_name=["L_Hand", "R_Hand"], soma_m
             if soma_model is None:
                 raise ValueError("soma_model is required to compute segment vertex indices")
 
-            # Import the geometry utilities from the GEM-SOMA package
-            import os
-            import sys
-
-            # Add imports path if not already present
-            imports_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "imports", "GEM-SOMA"
-            )
-            if imports_path not in sys.path:
-                sys.path.insert(0, imports_path)
-
             from soma.geometry.rig_utils import get_body_part_vertex_ids
 
             joint_id = SOMA_SEGMENT_JOINT_INDICES[name]
@@ -632,17 +580,6 @@ def get_soma_segment_indices(segment_name=["L_Hand", "R_Hand"], soma_model=None)
         else:
             if soma_model is None:
                 raise ValueError("soma_model is required to compute segment vertex indices")
-
-            # Import the geometry utilities from the GEM-SOMA package
-            import os
-            import sys
-
-            # Add imports path if not already present
-            imports_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "imports", "GEM-SOMA"
-            )
-            if imports_path not in sys.path:
-                sys.path.insert(0, imports_path)
 
             from soma.geometry.rig_utils import get_body_part_vertex_ids
 

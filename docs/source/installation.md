@@ -6,7 +6,14 @@ The repo ships three conda envs:
 
 - `grail` (Python 3.10) — 2D generation, 4D reconstruction, optimization
 - `hunyuan` (Python 3.10) — Hunyuan3D-2.1 asset generation
-- `sonic` (Python 3.11, optional) — retargeting + task-general tracking training (Isaac Lab + Isaac Sim)
+- `sonic` (Python 3.11, optional) — task-general tracking and the legacy
+  SMPL-X/GMR path (Isaac Lab + Isaac Sim)
+
+Fresh 4D reconstruction also uses three isolated workers: GEM-X for native
+SOMA pose prediction, MoGe-3 for depth, and MoSE3 for object-track proposals.
+Their dependency sets are intentionally kept out of the `grail` environment.
+The public SOMA Retargeter uses its own Python 3.12 environment and currently
+exposes only the `unitree_g1` target through GRAIL.
 
 ## Docker (Recommended)
 
@@ -18,27 +25,29 @@ Choose between two Linux AMD64, environment-only images:
 
 * - Image
   - Use it for
-* - `docker.io/nvgrail/grail:1.1.1` (`:latest`)
-  - Standard GRAIL with Kling; no MiniMax-H3/SGLang runtime.
-* - `docker.io/nvgrail/grail:1.1.1-minimax-h3` (`:minimax-h3`)
+* - `docker.io/nvgrail/grail:1.2.0` (`:latest`)
+  - Standard GRAIL with native SOMA 0.3 and Kling; no MiniMax-H3/SGLang runtime.
+* - `docker.io/nvgrail/grail:1.2.0-minimax-h3` (`:minimax-h3`)
   - Standard GRAIL plus an isolated MiniMax-H3/SGLang runtime.
 ```
 
 Both images ship pre-installed system dependencies, CUDA, and the `grail`,
 `hunyuan`, and `sonic` Conda environments. Neither image contains the
 GRAIL/Sana source, GRAIL or MiniMax-H3 checkpoints, API keys, or user data.
-Bind-mount your repo and run the lightweight setup script to validate
-GPU/Python-specific native extensions and download Blender. Keep `.env` and
-registry credentials on the host; never add them to an image build context.
+Bind-mount your repo and run the setup script to validate GPU/Python-specific
+native extensions, download Blender, and provision the isolated GEM-X,
+MoGe-3, MoSE3, and Python 3.12 SOMA Retargeter environments. The GRAIL-side
+native SOMA runtime is pinned to `py-soma-x==0.3.3`. Keep `.env` and registry
+credentials on the host; never add them to an image build context.
 
-For an exactly reproducible pull, use the immutable release index:
+For an exactly reproducible pull, use the immutable release digest:
 
 ```text
 Standard:
-docker.io/nvgrail/grail@sha256:6495aaa071de42c5b006ff8ed3976cd3f73572711bd6b25ac463bdac7a218f42
+docker.io/nvgrail/grail@sha256:14eb489f0d6eb80b8ae198d44bfd4800695af27202a7a38b504c57d22f65ad8e
 
 MiniMax-H3:
-docker.io/nvgrail/grail@sha256:43a322bc304bca2a2f1a349004b073098bf90715a8f528351a55b6b70fbf5f59
+docker.io/nvgrail/grail@sha256:fdbee9f32bd525d4d68c7346dd677d09c24c95575084061e67e5a290a60186d7
 ```
 
 ```bash
@@ -47,7 +56,7 @@ cd GRAIL
 git submodule update --init --recursive
 
 # The public Docker Hub images can be pulled without registry credentials.
-export GRAIL_IMAGE=docker.io/nvgrail/grail:1.1.1
+export GRAIL_IMAGE=docker.io/nvgrail/grail:1.2.0
 docker pull "$GRAIL_IMAGE"
 docker run --gpus all -it --shm-size=16g \
     -v "$PWD":/workspace/grail \
@@ -55,7 +64,7 @@ docker run --gpus all -it --shm-size=16g \
 
 # Inside the container
 cd /workspace/grail
-bash scripts/setup/install_env_docker.sh   # validates native extensions, downloads Blender (~6.4GB)
+bash scripts/setup/install_env_docker.sh   # validates extensions and installs isolated runtimes
 bash scripts/setup/download_checkpoints.sh # model checkpoints
 bash scripts/setup/download_comasset.sh    # datasets (optional)
 eval "$(conda shell.bash hook)"
@@ -66,6 +75,10 @@ conda activate grail
 The setup script rebuilds GPU/Python-specific native extensions when needed
 (`nvdiffrast`, FoundationPose `mycpp`) and installs Blender into the mounted
 checkout.
+
+The top-level `Dockerfile` is a minimal source-install bootstrap, not the build
+recipe for the published runtime. Use the prebuilt images above to retain all
+three pre-installed Conda environments.
 
 ## Install from Scratch
 
@@ -146,6 +159,7 @@ pip install "git+https://github.com/facebookresearch/detectron2.git" --no-build-
 # Core dependencies
 pip install numpy scipy opencv-python Pillow imageio ffmpeg-python trimesh fast_simplification open3d \
     pyyaml omegaconf einops tqdm scikit-image matplotlib joblib ninja pybind11
+pip install 'py-soma-x==0.3.3' 'uv>=0.9,<1'
 
 # ML dependencies
 pip install 'transformers==4.46.0' accelerate safetensors huggingface_hub sentencepiece \
@@ -199,23 +213,60 @@ pip install -e . --no-build-isolation
 cd ../../../..
 ```
 
-#### GEM-SOMA
+#### GEM-X (native SOMA prediction)
+
+GEM-X uses a separate environment and stores its approximately 7.7 GB verified
+asset bundle outside the checkout. The helper pins source, model revisions,
+file sizes, and SHA-256 hashes before linking them into the submodule.
+
 ```bash
-cd imports/GEM-SOMA
-git submodule update --init third_party/soma third_party/sam-3d-body
-pip install -e third_party/soma --no-deps
-cd third_party/soma && git lfs pull && cd ../..
-pip install -e . --no-deps
-pip install cloudpickle fvcore iopath pycocotools braceexpand 'setuptools<75'
-cd ../..
+git submodule update --init imports/GEM-X
+export GRAIL_GEM_X_ASSETS="${XDG_CACHE_HOME:-$HOME/.cache}/grail/models/gem-x"
+export GRAIL_GEM_X_ENV="${XDG_CACHE_HOME:-$HOME/.cache}/grail/envs/gem-x"
+python scripts/setup/setup_gem_x.py \
+    --assets "$GRAIL_GEM_X_ASSETS" --env "$GRAIL_GEM_X_ENV" \
+    --grail-python "$(which python)" --link-submodule
 ```
 
-#### MoGe
+#### MoGe-3 (isolated depth worker)
+
 ```bash
-pip install "git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183"
-pip install "git+https://github.com/EasternJournalist/pipeline.git@866f059d2a05cde05e4a52211ec5051fd5f276d6"
-pip install -e imports/MoGe/ --no-deps
+git submodule update --init imports/MoGe
+bash scripts/setup/install_moge3.sh --python "$(which python)"
 ```
+
+The default worker lives at `.venvs/moge3/bin/python`. Override it with
+`GRAIL_MOGE_PYTHON=/absolute/path/to/python`.
+
+#### MoSE3 + FoundationPose hybrid tracking
+
+```bash
+git submodule update --init imports/MoSE3 imports/FoundationPose
+bash scripts/setup/install_mose3.sh --python "$(which python)"
+bash scripts/setup/download_checkpoints.sh \
+    --skip-gem-smpl --skip-gem-x --skip-foundationpose \
+    --skip-hunyuan3d --skip-sonic
+```
+
+The worker and weights default to `.venvs/mose3/bin/python` and
+`imports/MoSE3/ckpt`. The runtime can be overridden with
+`GRAIL_MOSE3_PYTHON`, `GRAIL_MOSE3_ROOT`, and `GRAIL_MOSE3_CHECKPOINT`.
+
+#### SOMA Retargeter (Unitree G1 + DEx3)
+
+```bash
+git submodule update --init imports/soma-retargeter imports/GMR
+bash scripts/setup/install_soma_retargeter.sh --python "$(which python)"
+```
+
+This hydrates the bundled Unitree G1 retarget assets, verifies the original GMR
+G1-with-DEx3 MJCF and meshes, and installs the pinned retargeter into
+`imports/soma-retargeter/.venv`. Per-source DEx3 registry bundles are generated
+at retarget time; no upstream submodule is modified. The upstream runtime requires
+Python 3.12 and pins Newton, Warp, USD, NumPy, and SciPy through its `uv.lock`;
+the helper therefore keeps it isolated from the Python 3.10 GRAIL environment
+and the Python 3.11 SONIC environment. Do not install these dependencies into
+either shared environment manually.
 
 #### Hunyuan3D-2.1 (Separate Environment)
 
@@ -245,7 +296,10 @@ conda activate grail  # return to main env
 
 #### Sonic (Isaac Lab + Isaac Sim)
 
-Required only for retargeting and task-general tracking training. The one-shot path:
+Required for task-general tracking training and the explicit legacy
+SMPL-X/GMR retargeting path. Native SOMA-to-G1 retargeting uses the separate
+Python 3.12 environment installed above and does not require SONIC. The
+one-shot path is:
 
 ```bash
 bash scripts/setup/install_env_sonic.sh      # creates conda env 'sonic' (Python 3.11)
@@ -297,10 +351,11 @@ Other supported datasets: [BEHAVE](https://virtualhumans.mpi-inf.mpg.de/behave/)
 bash scripts/setup/download_checkpoints.sh
 ```
 
-Downloads the redistributable GEM-SMPL (~14 GB), GEM-SOMA (~6.4 GB),
-FoundationPose (~250 MB), RealESRGAN, and SONIC files. The script prints
-separate instructions for the licensed SMPL and SMPL-X body models; download
-them from the official [SMPL](https://smpl.is.tue.mpg.de/) and
+Downloads the redistributable GEM-SMPL, verified GEM-X bundle, pinned MoSE3
+weights, FoundationPose, RealESRGAN, and SONIC files. Native SOMA is the
+default and does not require licensed SMPL assets. Only legacy SMPL/SMPL-X
+configs need the licensed models; download them from the official
+[SMPL](https://smpl.is.tue.mpg.de/) and
 [SMPL-X](https://smpl-x.is.tue.mpg.de/) sites and place them at:
 
 ```text
@@ -316,7 +371,7 @@ export CUDA_HOME=/usr/local/cuda-12.1
 export PYOPENGL_PLATFORM=egl                  # headless rendering
 export LD_LIBRARY_PATH=$(python -c "import torch; print(torch.__path__[0])")/lib:$LD_LIBRARY_PATH
 
-# Sonic env only
+# Sonic / legacy GMR only
 export OMNI_KIT_ACCEPT_EULA=Yes               # Isaac Sim EULA
 export DISPLAY=:1                             # GMR mujoco viewer
 

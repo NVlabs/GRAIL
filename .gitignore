@@ -123,6 +123,7 @@ celerybeat.pid
 .env
 .venv
 .venv_hunyuan
+.venvs/
 env/
 venv/
 ENV/
@@ -259,3 +260,14 @@ out/
 models/
 wandb/
 logs_rl/
+
+# Curated public G1 embodiment assets and provenance. Keep every other
+# generated/downloaded data subtree ignored.
+!data/
+data/*
+!data/body_profiles/
+data/body_profiles/*
+!data/body_profiles/README.md
+!data/body_profiles/manifest.json
+!data/body_profiles/unitree_g1/
+!data/body_profiles/unitree_g1/**

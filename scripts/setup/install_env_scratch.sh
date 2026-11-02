@@ -6,8 +6,8 @@
 # Usage:
 #   bash scripts/setup/install_env_scratch.sh [OPTIONS]
 #   Options: --skip-system-deps, --skip-pytorch, --skip-cuda-extensions,
-#            --skip-foundationpose, --skip-gem-smpl, --skip-gem-soma,
-#            --skip-moge, --skip-hunyuan, --only-hunyuan,
+#            --skip-foundationpose, --skip-gem-smpl, --skip-gem-x,
+#            --skip-moge, --skip-mose3, --skip-hunyuan, --only-hunyuan,
 #            --install-sonic (opt-in; also creates the 'sonic' env with
 #                             Isaac Sim 5.1 + Isaac Lab v2.3.2 — ~30 GB disk,
 #                             ~30 min, needs sudo for git-lfs at the end),
@@ -25,8 +25,8 @@ section() { echo -e "\n${CYAN}══ $1 ══${NC}"; }
 
 # ── Parse arguments ────────────────────────────────────────────────────────
 SKIP_SYSTEM_DEPS=false; SKIP_PYTORCH=false; SKIP_CUDA_EXTENSIONS=false
-SKIP_FOUNDATIONPOSE=false; SKIP_GEM_SMPL=false; SKIP_GEM_SOMA=false
-SKIP_MOGE=false; SKIP_HUNYUAN=false; ONLY_HUNYUAN=false
+SKIP_FOUNDATIONPOSE=false; SKIP_GEM_SMPL=false; SKIP_GEM_X=false
+SKIP_MOGE=false; SKIP_MOSE3=false; SKIP_HUNYUAN=false; ONLY_HUNYUAN=false
 INSTALL_SONIC=false
 
 for arg in "$@"; do
@@ -36,8 +36,10 @@ for arg in "$@"; do
         --skip-cuda-extensions)  SKIP_CUDA_EXTENSIONS=true ;;
         --skip-foundationpose)   SKIP_FOUNDATIONPOSE=true ;;
         --skip-gem-smpl)         SKIP_GEM_SMPL=true ;;
-        --skip-gem-soma)         SKIP_GEM_SOMA=true ;;
+        --skip-gem-x)            SKIP_GEM_X=true ;;
+        --skip-gem-soma)         SKIP_GEM_X=true ;; # backwards-compatible alias
         --skip-moge)             SKIP_MOGE=true ;;
+        --skip-mose3)            SKIP_MOSE3=true ;;
         --skip-hunyuan)          SKIP_HUNYUAN=true ;;
         --only-hunyuan)          ONLY_HUNYUAN=true ;;
         --install-sonic)         INSTALL_SONIC=true ;;
@@ -48,8 +50,8 @@ done
 
 if [ "$ONLY_HUNYUAN" = true ]; then
     SKIP_SYSTEM_DEPS=true; SKIP_PYTORCH=true
-    SKIP_FOUNDATIONPOSE=true; SKIP_GEM_SMPL=true; SKIP_GEM_SOMA=true
-    SKIP_MOGE=true; SKIP_HUNYUAN=false
+    SKIP_FOUNDATIONPOSE=true; SKIP_GEM_SMPL=true; SKIP_GEM_X=true
+    SKIP_MOGE=true; SKIP_MOSE3=true; SKIP_HUNYUAN=false
 fi
 
 # ── Detect environment ─────────────────────────────────────────────────────
@@ -292,46 +294,41 @@ if [ "$SKIP_GEM_SMPL" = false ]; then
     fi
 fi
 
-# ── GEM-SOMA ──────────────────────────────────────────────────────────────
-if [ "$SKIP_GEM_SOMA" = false ]; then
-    section "GEM-SOMA"
-    GEM_SOMA_DIR="$PROJECT_ROOT/imports/GEM-SOMA"
-    if [ ! -f "$GEM_SOMA_DIR/setup.cfg" ]; then
-        warn "Submodule not found. Run: git submodule update --init imports/GEM-SOMA"
-    else
-        cd "$GEM_SOMA_DIR"
-        git submodule update --init third_party/soma third_party/sam-3d-body 2>&1 | tail -3
-        cd "$PROJECT_ROOT"
-
-        if [ -f "$GEM_SOMA_DIR/third_party/soma/setup.py" ]; then
-            $PIP install -e "$GEM_SOMA_DIR/third_party/soma" --no-deps 2>&1 | tail -3
-            if git lfs version &>/dev/null 2>&1; then
-                cd "$GEM_SOMA_DIR/third_party/soma" && git lfs pull 2>&1 | tail -3 || true
-                cd "$PROJECT_ROOT"
-            fi
-        fi
-
-        $PIP install -e "$GEM_SOMA_DIR" --no-deps 2>&1 | tail -3
-        $PIP install cloudpickle fvcore iopath pycocotools braceexpand 'setuptools<75' 2>&1 | tail -3
-        ok "GEM-SOMA"
+# ── GEM-X ──────────────────────────────────────────────────────────────────
+if [ "$SKIP_GEM_X" = false ]; then
+    section "GEM-X isolated prediction runtime and native SOMA-X"
+    GEM_X_ASSETS="${GRAIL_GEM_X_ASSETS:-${XDG_CACHE_HOME:-$HOME/.cache}/grail/models/gem-x}"
+    GEM_X_ENV="${GRAIL_GEM_X_ENV:-${XDG_CACHE_HOME:-$HOME/.cache}/grail/envs/gem-x}"
+    if [ ! -f "$PROJECT_ROOT/imports/GEM-X/pyproject.toml" ]; then
+        fail "Submodule missing. Run: git submodule update --init imports/GEM-X"
     fi
+    GEM_X_GRAIL_PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
+    "$PYTHON" scripts/setup/setup_gem_x.py --assets "$GEM_X_ASSETS" --env "$GEM_X_ENV" \
+        --grail-python "$GEM_X_GRAIL_PYTHON" --link-submodule
+    ok "GEM-X"
 fi
 
 # ── MoGe ──────────────────────────────────────────────────────────────────
 if [ "$SKIP_MOGE" = false ]; then
-    section "MoGe"
+    section "MoGe-3 isolated inference worker"
     MOGE_DIR="$PROJECT_ROOT/imports/MoGe"
     if [ ! -f "$MOGE_DIR/pyproject.toml" ]; then
         warn "Submodule not found. Run: git submodule update --init imports/MoGe"
     else
-        $PIP install \
-            "git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183" \
-            "git+https://github.com/EasternJournalist/pipeline.git@866f059d2a05cde05e4a52211ec5051fd5f276d6" \
-            2>&1 | tail -3
-        $PIP install -e "$MOGE_DIR" --no-deps 2>&1 | tail -3
-        ok "MoGe"
+        bash "$PROJECT_ROOT/scripts/setup/install_moge3.sh" --python "$PYTHON"
+        ok "MoGe-3 (separate Triton runtime; main grail environment preserved)"
     fi
 fi
+
+if [ "$SKIP_MOSE3" = false ]; then
+    section "MoSE3 isolated object-tracking worker"
+    bash "$PROJECT_ROOT/scripts/setup/install_mose3.sh" --python "$PYTHON"
+    ok "MoSE3 (weights downloaded separately; GRAIL PyTorch unchanged)"
+fi
+
+section "SOMA Retargeter (Unitree G1 + DEx3)"
+bash "$PROJECT_ROOT/scripts/setup/install_soma_retargeter.sh" --python "$PYTHON"
+ok "SOMA Retargeter"
 
 fi  # end ONLY_HUNYUAN guard
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Object pose estimation orchestration.
 
-Wraps FoundationPose with optional cropping and frame interpolation.
+Defaults to MoSE3 + FoundationPose and smoothing on the original timeline.
+The explicit FoundationPose backend retains optional crop/interpolation controls.
 """
 
 import glob
@@ -9,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -21,6 +23,24 @@ from grail.core.video import (
     save_images_to_video,
 )
 from grail.rendering.camera import world_to_camera_matrix
+
+STATIC_OBJECT_MASK_MOTION_THRESHOLD_FRAC = 0.1
+
+
+@dataclass(frozen=True)
+class ObjectMaskMotionResult:
+    """Result of comparing tracked object masks against the first frame."""
+
+    is_static: bool
+    frame_index: int | None
+    new_fraction: float
+    vanished_fraction: float
+    threshold_fraction: float
+
+
+class StaticObjectValidationError(RuntimeError):
+    """Raised when a required-static source object cannot be validated as static."""
+
 
 # ---------------------------------------------------------------------------
 # Video interpolation & subsampling
@@ -181,6 +201,62 @@ def adjust_camera_intrinsics_for_crop(input_dir, crop_bbox):
 
 
 # ---------------------------------------------------------------------------
+# Static-object validation
+# ---------------------------------------------------------------------------
+
+
+def check_object_masks_static(
+    video_masks,
+    threshold_fraction=STATIC_OBJECT_MASK_MOTION_THRESHOLD_FRAC,
+):
+    """Check whether tracked object masks remain at their first-frame location.
+
+    Pixels that disappear behind the tracked human are ignored. This preserves
+    the original FoundationPose fast-path heuristic while making it available
+    to callers that require the source object to be static.
+    """
+    if not video_masks:
+        raise ValueError("video_masks cannot be empty")
+    if not 0.0 <= threshold_fraction <= 1.0:
+        raise ValueError("threshold_fraction must be between 0 and 1")
+
+    first_obj_mask = (video_masks[0][0].squeeze() > 0).astype(np.float32)
+    object_pixel_count = float(first_obj_mask.sum())
+    if object_pixel_count == 0:
+        raise ValueError("first-frame object mask is empty")
+
+    max_new_fraction = 0.0
+    max_vanished_fraction = 0.0
+    for frame_index in range(len(video_masks)):
+        object_mask = (video_masks[frame_index][0].squeeze() > 0).astype(np.float32)
+        human_mask = (video_masks[frame_index][1].squeeze() > 0).astype(np.float32)
+
+        new_fraction = float((object_mask * (1 - first_obj_mask)).sum() / object_pixel_count)
+        vanished_fraction = float(
+            (first_obj_mask * (1 - object_mask) * (1 - human_mask)).sum() / object_pixel_count
+        )
+        max_new_fraction = max(max_new_fraction, new_fraction)
+        max_vanished_fraction = max(max_vanished_fraction, vanished_fraction)
+
+        if new_fraction > threshold_fraction or vanished_fraction > threshold_fraction:
+            return ObjectMaskMotionResult(
+                is_static=False,
+                frame_index=frame_index,
+                new_fraction=new_fraction,
+                vanished_fraction=vanished_fraction,
+                threshold_fraction=threshold_fraction,
+            )
+
+    return ObjectMaskMotionResult(
+        is_static=True,
+        frame_index=None,
+        new_fraction=max_new_fraction,
+        vanished_fraction=max_vanished_fraction,
+        threshold_fraction=threshold_fraction,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -195,8 +271,10 @@ def run_obj_pose_est(
     crop_image=False,
     interpolation_factor=1,
     is_static=False,
+    object_tracking_backend="mose3_fp_hybrid",
+    object_tracking_config="configs/object_tracking/mose3_fp_hybrid.yaml",
 ):
-    """Run object pose estimation with optional cropping and frame interpolation.
+    """Run dynamic tracking or the existing validated static-object fast path.
 
     Args:
         video_path: Path to the video file.
@@ -207,12 +285,13 @@ def run_obj_pose_est(
         device: Compute device.
         crop_image: Crop to minimal bbox covering all object positions.
         interpolation_factor: Frame interpolation factor (1 = none).
-        is_static: If False, detect if the object is static; if True, skip FoundationPose and generate static poses directly.
+        is_static: Whether the source object is required to be static. Static
+            masks use the fast path; dynamic masks run FoundationPose unless
+            this requirement is set, in which case they are rejected.
+        object_tracking_backend: Default hybrid, or explicit legacy foundationpose.
+        object_tracking_config: Hybrid inference, selection and smoothing preset.
     """
     _, original_frame_count = get_video_fps_and_frame_count(video_path)
-
-    first_obj_mask = (video_masks[0][0].squeeze() > 0).astype(np.uint8)
-    first_obj_float = first_obj_mask.astype(np.float32)
 
     # Save mask videos for debugging
     frame_count = len(video_masks)
@@ -224,27 +303,39 @@ def run_obj_pose_est(
     save_images_to_video(obj_masks, os.path.join(debug_dir, "obj_masks.mp4"))
     save_images_to_video(human_masks, os.path.join(debug_dir, "human_masks.mp4"))
 
-    if not is_static:
-        # Check if object is static (not moving across frames)
-        is_static = True
-        threshold_frac = 0.1
-        for i in range(frame_count):
-            obj_f = (video_masks[i][0].squeeze() > 0).astype(np.float32)
-            human_f = (video_masks[i][1].squeeze() > 0).astype(np.float32)
-            obj_total = np.sum(first_obj_float)
-            if obj_total == 0:
-                break
-            threshold = threshold_frac * obj_total
+    requires_static_object = is_static
+    try:
+        mask_motion = check_object_masks_static(video_masks)
+    except ValueError as exc:
+        if requires_static_object:
+            raise StaticObjectValidationError(
+                f"Could not validate required-static object: {exc}"
+            ) from exc
+        raise
 
-            # New object pixels outside first-frame mask → object moved
-            if np.sum(obj_f * (1 - first_obj_float)) > threshold:
-                is_static = False
-                break
+    if mask_motion.is_static:
+        print(
+            "Object-mask motion check: static "
+            f"(max_new={mask_motion.new_fraction:.4f}, "
+            f"max_vanished={mask_motion.vanished_fraction:.4f}, "
+            f"thr={mask_motion.threshold_fraction:.4f})"
+        )
+    else:
+        print(
+            "Object-mask motion check: dynamic "
+            f"(frame={mask_motion.frame_index}, new={mask_motion.new_fraction:.4f}, "
+            f"vanished={mask_motion.vanished_fraction:.4f}, "
+            f"thr={mask_motion.threshold_fraction:.4f})"
+        )
+        if requires_static_object:
+            raise StaticObjectValidationError(
+                "Required-static object moved in the source video: "
+                f"frame={mask_motion.frame_index}, new={mask_motion.new_fraction:.4f}, "
+                f"vanished={mask_motion.vanished_fraction:.4f}, "
+                f"threshold={mask_motion.threshold_fraction:.4f}"
+            )
 
-            # Object pixels vanished without human occlusion → object moved
-            if np.sum(first_obj_float * (1 - obj_f) * (1 - human_f)) > threshold:
-                is_static = False
-                break
+    is_static = mask_motion.is_static
 
     if is_static:
         print("Object is static — skipping FoundationPose, generating static poses directly")
@@ -270,6 +361,34 @@ def run_obj_pose_est(
         save_object_pose_data(pose_list, poses_output_file)
         print(f"Saved {len(pose_list)} static poses to: {poses_output_file}")
         return True
+
+    if object_tracking_backend == "mose3_fp_hybrid":
+        if crop_image or interpolation_factor != 1:
+            raise ValueError("Hybrid initialization requires uncropped original-rate source frames")
+        masks_file = os.path.join(input_dir, "initial_object_masks.npz")
+        if os.path.exists(masks_file):
+            raise FileExistsError("Use a fresh scene directory for object initialization")
+        np.savez_compressed(masks_file, object_mask0=obj_masks[0], human_mask0=human_masks[0])
+        return run_subprocess(
+            [
+                sys.executable,
+                "-m",
+                "grail.pose_est.object_initialization",
+                "--video",
+                os.path.abspath(video_path),
+                "--mesh-file",
+                os.path.abspath(mesh_file),
+                "--scene",
+                os.path.abspath(input_dir),
+                "--masks",
+                masks_file,
+                "--preset",
+                object_tracking_config,
+            ],
+            "MoSE3 + FoundationPose initialization and smoothing",
+        )
+    if object_tracking_backend != "foundationpose":
+        raise ValueError(f"Unknown object tracking backend: {object_tracking_backend}")
 
     # Frame interpolation
     actual_video = video_path
@@ -331,11 +450,21 @@ def run_obj_pose_est(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Object Pose Estimation (FoundationPose)")
+    parser = argparse.ArgumentParser(description="Object trajectory initialization")
     parser.add_argument("--mesh_file", type=str, required=True)
     parser.add_argument("--test_scene_dir", type=str, required=True)
     parser.add_argument("--video", type=str, required=True)
     parser.add_argument("--debug", type=int, default=2)
+    parser.add_argument("--masks-cache", required=True, help="Original SAM mask cache from step 2")
+    parser.add_argument(
+        "--object-tracking-backend",
+        choices=["mose3_fp_hybrid", "foundationpose"],
+        default="mose3_fp_hybrid",
+    )
+    parser.add_argument(
+        "--object-tracking-config", default="configs/object_tracking/mose3_fp_hybrid.yaml"
+    )
+    parser.add_argument("--is-static", action="store_true")
     args = parser.parse_args()
 
     for p in (args.mesh_file, args.test_scene_dir, args.video):
@@ -343,19 +472,16 @@ if __name__ == "__main__":
             print(f"Error: not found: {p}")
             sys.exit(1)
 
-    # Simplified CLI — uses adapter directly
-    adapter_script = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "adapters", "foundation_pose.py"
-    )
-    cmd = [
-        sys.executable,
-        adapter_script,
-        "--mesh_file",
+    from grail.preprocessing.preprocess import load_masks_from_cache
+
+    success = run_obj_pose_est(
+        args.video,
         args.mesh_file,
-        "--test_scene_dir",
         args.test_scene_dir,
-        "--debug",
-        str(args.debug),
-    ]
-    success = run_subprocess(cmd, "FoundationPose tracking")
+        load_masks_from_cache(args.masks_cache),
+        debug=args.debug,
+        is_static=args.is_static,
+        object_tracking_backend=args.object_tracking_backend,
+        object_tracking_config=args.object_tracking_config,
+    )
     sys.exit(0 if success else 1)

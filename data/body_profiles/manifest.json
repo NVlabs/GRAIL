@@ -1,0 +1,9 @@
+{
+  "schema": "grail.body-profile-package.v1",
+  "profiles": [
+    {
+      "robot": "unitree_g1",
+      "manifest": "unitree_g1/manifest.json"
+    }
+  ]
+}

@@ -1,0 +1,811 @@
+{
+    "id": "c416aab4-cf3f-11f1-bd53-1929f989c6a9",
+    "gender": {
+        "value": "male"
+    },
+    "age": {
+        "value": 11,
+        "unit": "year",
+        "category": "child"
+    },
+    "ethnicity": {
+        "value": "pacific_islander",
+        "sub_value": "unknown"
+    },
+    "body_shape": {
+        "value": "average"
+    },
+    "height": {
+        "value": 135.887,
+        "percentile": 30,
+        "category": "average"
+    },
+    "anatomy": [
+        {
+            "supercontext": "anatomy",
+            "context": "head",
+            "object_id": "6717d970f372dc5e7d4f074e",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6717d970f372dc5e7d4f074e/1684870010005_279714806808546_tex1.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        },
+        {
+            "supercontext": "anatomy",
+            "context": "eyes",
+            "object_id": "6903febe930e65d884e76d6a",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6903febe930e65d884e76d6a/char_unisex_eyes_mid_model.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        },
+        {
+            "supercontext": "anatomy",
+            "context": "dental",
+            "object_id": "6903ff8886f882989948771d",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6903ff8886f882989948771d/char_unisex_dental_mid_model.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        }
+    ],
+    "groom": [
+        {
+            "supercontext": "groom",
+            "context": "hair",
+            "object_id": "69eaea16cff841a6dd275d94",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/nvHuman_hair_main.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        }
+    ],
+    "outfit": [
+        {
+            "supercontext": "footwear",
+            "context": "everyday_shoes",
+            "object_id": "69a63117ebf84a5bea77ce78",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a63117ebf84a5bea77ce78/unisex_everyday_shoes_ballet_flats_fot0001/fot_unisex_everyday_shoes_ballet_flats_fot0001_model_published.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        },
+        {
+            "supercontext": "garment",
+            "context": "pants",
+            "object_id": "69a61ac2ebf84a5bea77ce65",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61ac2ebf84a5bea77ce65/female_pants_leggings_pan001/gar_female_pants_leggings_pan001_model_published.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6718e9f81a233ed8fabf2254/char_female_age30_body_mid_model_published.usd"
+        },
+        {
+            "supercontext": "garment",
+            "context": "shirt",
+            "object_id": "69a61d11b17694e596588fac",
+            "library": "generic",
+            "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61d11b17694e596588fac/unisex_shirt_tee_sht001/gar_unisex_shirt_tee_sht001_model_published.usd",
+            "ref_body": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/6719155bd005cb1618e08c23/char_male_age30_body_mid_model_published.usd"
+        }
+    ],
+    "anthropometry": {
+        "arm_length": 38.694,
+        "elbow_to_wrist_length": 18.0,
+        "hip_to_knee_length": 33.932,
+        "knee_to_ankle_length": 30.561,
+        "leg_length": 64.492,
+        "neck_to_left_hip_length": 41.919,
+        "neck_to_pelvis_length": 36.119,
+        "neck_to_right_hip_length": 41.93,
+        "shoulder_to_elbow_length": 20.703,
+        "shoulder_to_shoulder_length": 22.18
+    },
+    "profile": {
+        "biography": "This is a child male human of Pacific_islander heritage dressed in pants and shirt. He is wearing nurse_cap, disposable_gloves, disposable_mask, safety_glasses, headphones, and ballet_flats.",
+        "project": "generic",
+        "scenario": "default",
+        "role": "casual"
+    },
+    "appearance": [],
+    "materials": [
+        {
+            "material_context": "skin",
+            "category": "",
+            "classname": "SkinMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b423eea8775851be6d",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b423eea8775851be6d/SKIN/skin.usda"
+            },
+            "material": {
+                "object_id": "69a602a931aa9c1c102134b7",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a602a931aa9c1c102134b7"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "texture12": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cfc7ebf84a5bea77cdf5/utility/body_mask/bodyRGB_mask.<UDIM>.png",
+                        "object_id": "69a5cfc7ebf84a5bea77cdf5",
+                        "library": "generic"
+                    },
+                    "texture16": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cfc7ebf84a5bea77cdf5/utility/skin_detail_normal/human_skin_cheek_detail.png",
+                        "object_id": "69a5cfc7ebf84a5bea77cdf5",
+                        "library": "generic"
+                    }
+                },
+                "Required Inputs": {
+                    "texture": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a65636ebf84a5bea77ce7f/textures/nvh_c_skin_diffuseReflectionColor.<UDIM>.png",
+                        "object_id": "69a65636ebf84a5bea77ce7f",
+                        "library": "generic"
+                    },
+                    "texture15": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a65636ebf84a5bea77ce7f/textures/nvh_c_skin_geometryNormal.<UDIM>.png",
+                        "object_id": "69a65636ebf84a5bea77ce7f",
+                        "library": "generic"
+                    },
+                    "texture14": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a65636ebf84a5bea77ce7f/textures/nvh_c_skin_specularReflectionRoughness.<UDIM>.png",
+                        "object_id": "69a65636ebf84a5bea77ce7f",
+                        "library": "generic"
+                    }
+                },
+                "Color Correction": {
+                    "exposure": 0.029999915999999988,
+                    "gamma": 0.6800000840000001,
+                    "hue_shift": 0.0007199999999999999,
+                    "multiply_color": [
+                        1.0,
+                        0.9999960000000598,
+                        0.9999950000000598
+                    ],
+                    "saturation": 0.874999998339186,
+                    "exposure1": 0.0,
+                    "gamma1": 1.0,
+                    "hue_shift1": 0.0,
+                    "saturation1": 1.0,
+                    "gamma2": 0.9149999988706352,
+                    "hue_shift2": 0.0,
+                    "saturation2": 1.0
+                },
+                "Textured Eyebrows": {
+                    "texture19": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cf8bb17694e596588f2e/eyebrow/tg_24/nvHuman_eyebrow_normal.1001.png",
+                        "object_id": "69a5cf8bb17694e596588f2e",
+                        "library": "generic"
+                    },
+                    "a9": 1.0,
+                    "color_24": [
+                        0.23137254901960785,
+                        0.1843137254901961,
+                        0.1843137254901961
+                    ]
+                },
+                "Masks": {
+                    "texture5": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/1/areaMask_forehead.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    },
+                    "texture6": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/2/areaMask_eye.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    },
+                    "texture7": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/3/areaMask_nose.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    },
+                    "texture8": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/4/areaMask_cheeks.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    },
+                    "texture9": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/5/areaMask_chinJawline.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    },
+                    "texture10": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce30ebf84a5bea77cdf2/areaMask/6/areaMask_headNeckEars.png",
+                        "object_id": "69a5ce30ebf84a5bea77cdf2",
+                        "library": "generic"
+                    }
+                },
+                "Makeup": {
+                    "texture13": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ce5131aa9c1c10213453/makeUp/04/makeup_color.1001.png",
+                        "object_id": "69a5ce5131aa9c1c10213453",
+                        "library": "generic"
+                    },
+                    "color_2": [
+                        0.5803921568627451,
+                        0.5215686274509804,
+                        0.4980392156862745
+                    ],
+                    "a2": 1.0
+                },
+                "Acne": {
+                    "a4": 0.6398566625111652,
+                    "a11": 0,
+                    "a114": 3,
+                    "a111": 1,
+                    "a112": 2,
+                    "a14": 3,
+                    "a113": 4,
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cf4931aa9c1c10213455/acne/01/acne.1001.png",
+                        "object_id": "69a5cf4931aa9c1c10213455",
+                        "library": "generic"
+                    },
+                    "texture17": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cf4931aa9c1c10213455/acne/01/normal.1001.png",
+                        "object_id": "69a5cf4931aa9c1c10213455",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "skin",
+                "sdg_material_type_name": "skin",
+                "mesh_pattern": [
+                    ".+/Meshes/I2A_NvHuman_Mesh$",
+                    ".+c_(skin|headWatertight)_(hi|lo|xhi|mid)$"
+                ],
+                "melanin": 35.925885431692556,
+                "undertone": 47
+            }
+        },
+        {
+            "material_context": "eyechoroid",
+            "category": "green",
+            "classname": "EyesMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b423eea8775851be6e",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b423eea8775851be6e/EYECHOROID/eyechoroid.usda"
+            },
+            "material": {
+                "object_id": "69a5ea0631aa9c1c1021347c",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ea0631aa9c1c1021347c"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "add_color": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "contrast": [
+                        1.0,
+                        1.0,
+                        1.0
+                    ],
+                    "contrast1": [
+                        1.0,
+                        1.0,
+                        1.0
+                    ],
+                    "exposure": 0.0,
+                    "exposure1": 0.5799999833106995,
+                    "exposure2": 0.0,
+                    "gamma": 1.149999976158142,
+                    "gamma1": 1.2899999618530273,
+                    "gamma2": 1.3600000143051147,
+                    "hue_shift": 0.17999999225139618,
+                    "hue_shift1": 0.019999999552965164,
+                    "hue_shift2": 0.009999999776482582,
+                    "multiply_color": [
+                        0.54901963,
+                        0.67058825,
+                        0.39607844
+                    ],
+                    "multiply_color1": [
+                        0.39607844,
+                        0.53333336,
+                        0.07450981
+                    ],
+                    "multiply_color2": [
+                        0.5411765,
+                        0.57254905,
+                        0.20392157
+                    ],
+                    "saturation": 0.29999998211860657,
+                    "saturation1": 1.0099999904632568,
+                    "saturation2": 1.0099999904632568,
+                    "brightness": 0.46000000834465027,
+                    "brightness1": 0.0,
+                    "rotation": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "weight": 0.0,
+                    "texture": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_choroid_diffuse.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eyes_c_iris_ciliary_mask.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture2": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_iris_pupillary_mask.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eyes_c_iris_collarette_mask.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture4": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_iris_limbus_mask.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture5": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_sclera_yellow_mask.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture6": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_caustics_normal.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    },
+                    "texture7": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5cd72ebf84a5bea77cdf1/choroid/nvh_eye_c_choroid_normal.png",
+                        "object_id": "69a5cd72ebf84a5bea77cdf1",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "eyes",
+                "sdg_material_type_name": "eye",
+                "mesh_pattern": [
+                    ".+(l|r)_choroid_(hi|lo|xhi|mid)$"
+                ],
+                "melanin": 35.925885431692556
+            }
+        },
+        {
+            "material_context": "eyecornea",
+            "category": "",
+            "classname": "EyesMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b423eea8775851be6c",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b423eea8775851be6c/EYECORNEA/eyecornea.usda"
+            },
+            "material": {
+                "object_id": "69a5ea2bb17694e596588f52",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ea2bb17694e596588f52"
+            },
+            "repro_args": {
+                "asset_namespace": "eyes",
+                "sdg_material_type_name": "eye",
+                "mesh_pattern": [
+                    ".+(l|r)_cornea_(hi|lo|xhi|mid)$"
+                ],
+                "melanin": 35.925885431692556
+            }
+        },
+        {
+            "material_context": "eyelens",
+            "category": "",
+            "classname": "EyesMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b6fa18ef9d2111cd8d",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b6fa18ef9d2111cd8d/EYELENS/eyelens.usda"
+            },
+            "material": {
+                "object_id": "69a5ea4131aa9c1c1021347d",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5ea4131aa9c1c1021347d"
+            },
+            "repro_args": {
+                "asset_namespace": "eyes",
+                "sdg_material_type_name": "eye",
+                "mesh_pattern": [
+                    ".+(l|r)_lens_(hi|lo|xhi|mid)$"
+                ],
+                "melanin": 35.925885431692556
+            }
+        },
+        {
+            "material_context": "haircap",
+            "category": "",
+            "classname": "GroomMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b623eea8775851be71",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b623eea8775851be71/HAIRCAP/haircap.usda"
+            },
+            "material": {
+                "object_id": "69a5fee2b17694e596588f84",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5fee2b17694e596588f84"
+            },
+            "repro_args": {
+                "Required Inputs": {
+                    "color_1": [
+                        0.23921568627450981,
+                        0.1568627450980392,
+                        0.09019607843137255
+                    ]
+                },
+                "Asset Inputs": {
+                    "texture": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_caphair_id.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_caphair_AoRTHtA.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture2": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_caphair_AnisoRough.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_caphair_geometryNormal.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "hair",
+                "sdg_material_type_name": "hair",
+                "mesh_pattern": [
+                    ".+(?<=c_)cap[hH]air_meshDescrip.+",
+                    ".+(?<=c_)hair[cC]ap_meshDescrip.+"
+                ],
+                "melanin": 18.195634909572927
+            }
+        },
+        {
+            "material_context": "haircard",
+            "category": "",
+            "classname": "GroomMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b688da105aab481f91",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b688da105aab481f91/HAIRCARD/haircard.usda"
+            },
+            "material": {
+                "object_id": "69eaf81901c969053312493d",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaf81901c969053312493d"
+            },
+            "repro_args": {
+                "Required Inputs": {
+                    "color_1": [
+                        0.23921568627450981,
+                        0.1568627450980392,
+                        0.09019607843137255
+                    ]
+                },
+                "Asset Inputs": {
+                    "texture": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_card_id.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_card_AoRTHtA.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture2": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_card_AnisoRough.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    },
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69eaea16cff841a6dd275d94/VeronicaYoung/textures/nvHuman_c_card_geometryNormal.png",
+                        "object_id": "69eaea16cff841a6dd275d94",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "hair",
+                "sdg_material_type_name": "hair",
+                "mesh_pattern": [
+                    ".+card[hH]air_meshDescrip.+",
+                    ".+[cC]ards_meshDescrip.+"
+                ],
+                "melanin": 18.195634909572927
+            }
+        },
+        {
+            "material_context": "textile",
+            "category": "polyester_twill",
+            "classname": "TextileMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b488da105aab481f8e",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b488da105aab481f8e/TEXTILE/textile.usda"
+            },
+            "material": {
+                "object_id": "69a63bacb17694e596588fbd",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a63bacb17694e596588fbd"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "a5": false,
+                    "f": 0.10000000149011612,
+                    "f1": 0.5,
+                    "scaling2": [
+                        20.0,
+                        20.0
+                    ],
+                    "f3": 0.0,
+                    "a2": 1.0,
+                    "scaling1": [
+                        5.0,
+                        5.0
+                    ],
+                    "factor": 0.5,
+                    "factor1": 0.5
+                },
+                "Required Inputs": {
+                    "a4": [
+                        0.11,
+                        0.11,
+                        0.11
+                    ],
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d22a31aa9c1c10213459/twill/polyester_twill_color_mask.png",
+                        "object_id": "69a5d22a31aa9c1c10213459",
+                        "library": "generic"
+                    },
+                    "texture31": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d22a31aa9c1c10213459/twill/polyester_twill_orm.png",
+                        "object_id": "69a5d22a31aa9c1c10213459",
+                        "library": "generic"
+                    },
+                    "texture7": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d22a31aa9c1c10213459/twill/polyester_twill_normal.png",
+                        "object_id": "69a5d22a31aa9c1c10213459",
+                        "library": "generic"
+                    },
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d22a31aa9c1c10213459/twill/polyester_twill_specular_rotation.png",
+                        "object_id": "69a5d22a31aa9c1c10213459",
+                        "library": "generic"
+                    },
+                    "texture10": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d22a31aa9c1c10213459/twill/polyester_twill_wrinkle_normal.png",
+                        "object_id": "69a5d22a31aa9c1c10213459",
+                        "library": "generic"
+                    }
+                },
+                "Asset Inputs": {
+                    "texture2": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61ac2ebf84a5bea77ce65/female_pants_leggings_pan001/textures/detail.1001.png",
+                        "object_id": "69a61ac2ebf84a5bea77ce65",
+                        "library": "generic"
+                    },
+                    "texture4": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61ac2ebf84a5bea77ce65/female_pants_leggings_pan001/textures/occlusionRoughnessMetalness.1001.png",
+                        "object_id": "69a61ac2ebf84a5bea77ce65",
+                        "library": "generic"
+                    },
+                    "texture5": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61ac2ebf84a5bea77ce65/female_pants_leggings_pan001/textures/wearTear.1001.png",
+                        "object_id": "69a61ac2ebf84a5bea77ce65",
+                        "library": "generic"
+                    },
+                    "texture6": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61ac2ebf84a5bea77ce65/female_pants_leggings_pan001/textures/geometryNormal.1001.png",
+                        "object_id": "69a61ac2ebf84a5bea77ce65",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "pants",
+                "sdg_material_type_name": "polyester",
+                "mesh_pattern": [
+                    "(?!.*HIDDEN).+(l|r|c|lt|rt).+"
+                ]
+            }
+        },
+        {
+            "material_context": "textile",
+            "category": "cotton_jersey",
+            "classname": "TextileMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b488da105aab481f8e",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b488da105aab481f8e/TEXTILE/textile.usda"
+            },
+            "material": {
+                "object_id": "69a63b75ebf84a5bea77ce7b",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a63b75ebf84a5bea77ce7b"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "a5": true,
+                    "f": 0.0,
+                    "f1": 0.15000000596046448,
+                    "scaling2": [
+                        20.0,
+                        20.0
+                    ],
+                    "f3": 0.0,
+                    "a2": 1.0,
+                    "scaling1": [
+                        5.0,
+                        5.0
+                    ],
+                    "factor": 1.5,
+                    "factor1": 1.0
+                },
+                "Required Inputs": {
+                    "a4": [
+                        0.33,
+                        0.33,
+                        0.33
+                    ],
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d115b17694e596588f30/jersey/cotton_jersey_color_mask.png",
+                        "object_id": "69a5d115b17694e596588f30",
+                        "library": "generic"
+                    },
+                    "texture31": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d115b17694e596588f30/jersey/cotton_jersey_orm.png",
+                        "object_id": "69a5d115b17694e596588f30",
+                        "library": "generic"
+                    },
+                    "texture7": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d115b17694e596588f30/jersey/cotton_jersey_normal.png",
+                        "object_id": "69a5d115b17694e596588f30",
+                        "library": "generic"
+                    },
+                    "texture1": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d115b17694e596588f30/jersey/cotton_jersey_specular_rotation.png",
+                        "object_id": "69a5d115b17694e596588f30",
+                        "library": "generic"
+                    },
+                    "texture10": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d115b17694e596588f30/jersey/cotton_jersey_wrinkle_normal.png",
+                        "object_id": "69a5d115b17694e596588f30",
+                        "library": "generic"
+                    }
+                },
+                "Asset Inputs": {
+                    "texture2": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61d11b17694e596588fac/unisex_shirt_tee_sht001/textures/detail.1001.png",
+                        "object_id": "69a61d11b17694e596588fac",
+                        "library": "generic"
+                    },
+                    "texture4": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61d11b17694e596588fac/unisex_shirt_tee_sht001/textures/occlusionRoughnessMetalness.1001.png",
+                        "object_id": "69a61d11b17694e596588fac",
+                        "library": "generic"
+                    },
+                    "texture5": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61d11b17694e596588fac/unisex_shirt_tee_sht001/textures/wearTear.1001.png",
+                        "object_id": "69a61d11b17694e596588fac",
+                        "library": "generic"
+                    },
+                    "texture6": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a61d11b17694e596588fac/unisex_shirt_tee_sht001/textures/geometryNormal.1001.png",
+                        "object_id": "69a61d11b17694e596588fac",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "shirt",
+                "sdg_material_type_name": "fabric",
+                "mesh_pattern": [
+                    "(?!.*HIDDEN).+(l|r|c|lt|rt).+"
+                ]
+            }
+        },
+        {
+            "material_context": "plastic",
+            "category": "rubber",
+            "classname": "PlasticMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b423eea8775851be6b",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b423eea8775851be6b/PLASTIC/plastic.usda"
+            },
+            "material": {
+                "object_id": "69a60139b17694e596588f89",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a60139b17694e596588f89"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "specular_reflection_roughness": 0.75,
+                    "enable_specular_transmission": false,
+                    "specular_reflection_anisotropy": 0.0,
+                    "specular_reflection_ior": 1.4600000381469727,
+                    "specular_transmission_weight": 0.0
+                },
+                "Required Inputs": {
+                    "coat_color": [
+                        0.749,
+                        0.627,
+                        0.506
+                    ],
+                    "specular_transmission_color": [
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "b": false
+                },
+                "asset_namespace": "footwear",
+                "sdg_material_type_name": "rubber",
+                "mesh_pattern": [
+                    "(?!.*HIDDEN).+sole.+"
+                ]
+            }
+        },
+        {
+            "material_context": "textile",
+            "category": "leather_aniline",
+            "classname": "TextileMaterialLoader",
+            "master_material": {
+                "object_id": "69b849b488da105aab481f8e",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69b849b488da105aab481f8e/TEXTILE/textile.usda"
+            },
+            "material": {
+                "object_id": "69a63c11b17694e596588fbf",
+                "library": "generic",
+                "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a63c11b17694e596588fbf"
+            },
+            "repro_args": {
+                "Fixed Config": {
+                    "a5": true,
+                    "f": 0.10000000149011612,
+                    "f1": 0.30000001192092896,
+                    "scaling2": [
+                        15.0,
+                        15.0
+                    ],
+                    "f3": 0.0,
+                    "a2": 2.0,
+                    "scaling1": [
+                        3.0,
+                        3.0
+                    ],
+                    "factor": 1.0,
+                    "factor1": 0.5
+                },
+                "Required Inputs": {
+                    "a4": [
+                        0.518,
+                        0.361,
+                        0.325
+                    ],
+                    "texture3": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d36931aa9c1c1021345b/anilne/leather_aniline_color_mask.png",
+                        "object_id": "69a5d36931aa9c1c1021345b",
+                        "library": "generic"
+                    },
+                    "texture31": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d36931aa9c1c1021345b/anilne/leather_aniline_orm.png",
+                        "object_id": "69a5d36931aa9c1c1021345b",
+                        "library": "generic"
+                    },
+                    "texture7": {
+                        "url": "https://dh-sdg-service-us-west-2.s3.us-west-2.amazonaws.com/SDG_DH_Generator/GENERIC_LIBRAIRIES/PUBLISH/69a5d36931aa9c1c1021345b/anilne/leather_aniline_normal.png",
+                        "object_id": "69a5d36931aa9c1c1021345b",
+                        "library": "generic"
+                    }
+                },
+                "asset_namespace": "footwear",
+                "sdg_material_type_name": "leather",
+                "mesh_pattern": [
+                    "(?!.*HIDDEN).+upperSG"
+                ]
+            }
+        }
+    ]
+}

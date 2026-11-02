@@ -4,6 +4,7 @@
 # Usage:
 #   bash scripts/setup/install_env_docker.sh
 #   SKIP_BLENDER=1 bash scripts/setup/install_env_docker.sh  # test native extensions only
+#   SKIP_RECON_RUNTIMES=1 bash scripts/setup/install_env_docker.sh
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -70,7 +71,8 @@ fi
 
 # Pin setuptools<81 in hunyuan env: lightning_fabric (transitive dep via
 # pytorch_lightning) calls pkg_resources.declare_namespace(), which setuptools
-# 81 removed. The pre-built Docker image ships setuptools 82+.
+# 81 removed. Older/custom images may carry a newer incompatible setuptools;
+# release 1.2.0 already includes a compatible version.
 if conda env list 2>/dev/null | grep -q "^hunyuan "; then
     conda run -n hunyuan pip install --quiet 'setuptools<81' 2>&1 | tail -1
 
@@ -148,6 +150,38 @@ if [ -x "$BLENDER_PY" ]; then
     $BLENDER_PY -m ensurepip 2>&1 | tail -1
     $BLENDER_PY -m pip install 'numpy==2.2.6' pyyaml trimesh Pillow imageio scipy tqdm omegaconf opencv-python 2>&1 | tail -3
     $BLENDER_PY -m pip install -e "$PROJECT_ROOT" --no-deps 2>&1 | tail -1
+fi
+
+# Reconstruction uses isolated, mutually incompatible predictor environments.
+# Model weights remain external and are handled by download_checkpoints.sh.
+if [ "${SKIP_RECON_RUNTIMES:-0}" != "1" ]; then
+    GRAIL_PYTHON="$(run_grail python -c 'import sys; print(sys.executable)')"
+    GEM_X_ENV="${GRAIL_GEM_X_ENV:-${XDG_CACHE_HOME:-$HOME/.cache}/grail/envs/gem-x}"
+    run_grail python scripts/setup/setup_gem_x.py \
+        --env "$GEM_X_ENV" --env-only --grail-python "$GRAIL_PYTHON"
+    GEM_X_LINK="$PROJECT_ROOT/imports/GEM-X/.venv"
+    if [ -L "$GEM_X_LINK" ]; then
+        [ "$(readlink -f "$GEM_X_LINK")" = "$(readlink -f "$GEM_X_ENV")" ] || {
+            echo -e "${RED}GEM-X .venv points to a different environment.${NC}"; exit 1;
+        }
+    elif [ -e "$GEM_X_LINK" ]; then
+        echo -e "${RED}Refusing to replace existing GEM-X .venv.${NC}"; exit 1
+    else
+        ln -s "$GEM_X_ENV" "$GEM_X_LINK"
+    fi
+    bash scripts/setup/install_moge3.sh --python "$GRAIL_PYTHON"
+    bash scripts/setup/install_mose3.sh --python "$GRAIL_PYTHON"
+    bash scripts/setup/install_soma_retargeter.sh --python "$GRAIL_PYTHON"
+    run_grail python - <<'PY'
+import importlib.metadata as metadata
+
+import soma
+
+assert soma.__version__ == "0.3.3"
+assert metadata.version("py-soma-x") == "0.3.3"
+print("GRAIL native SOMA runtime OK: py-soma-x=0.3.3")
+PY
+    run_grail python -m grail.retargeting.soma --help >/dev/null
 fi
 
 echo -e "${GREEN}Docker setup complete.${NC}"

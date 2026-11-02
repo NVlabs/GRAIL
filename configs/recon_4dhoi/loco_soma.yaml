@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4D HOI Reconstruction — LOCOMOTION / TERRAIN (SOMA body model)
+# 4D HOI Reconstruction — LOCOMOTION / TERRAIN (native SOMA03 body model)
 #
 # Same as loco_smplx.yaml — only body_model and SMPL-X-specific paths differ.
 # All optimization weights, filters, and post-processing settings are kept in
@@ -10,24 +10,36 @@
 paths:
   results_dir: "results"
   video_dir: "generation/videos_kling"
-  hmr_dir: "generation/hmr_soma"
-  hmr_cache_dir: "generation/hmr_soma_cache"
+  hmr_dir: "generation/hmr_gem_x_native77"
+  hmr_cache_dir: "generation/hmr_gem_x_native77_cache"
   foundation_pose_dir: "generation/foundation_pose"
   foundation_pose_output_dir: "generation/foundation_pose_output"
-  recon_cache_dir: "generation/4dhoi_recon_cache"
+  recon_cache_dir: "generation/4dhoi_recon_soma03_cache"
   depth_gt_dir: "generation/depth_maps"
-  output_dir: "generation/4dhoi_recon_soma"
-  vis_scenepic_dir: "generation/vis_html"
+  output_dir: "generation/4dhoi_recon_soma03"
+  vis_scenepic_dir: "generation/vis_html_soma03"
 
 # ── Human model config ────────────────────────────────────────────────────────
 human_model:
-  body_model: "soma"
+  body_model: "soma03"
   static_cam: true
-  smplx_model_path: "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz"
-  smplx_shape_params_path: "data/RenderPeople_fitsmpl"
-  soma_model_path: "imports/GEM-SOMA/inputs/mhr_data/mhr_model.pt"
-  soma_shape_params_path: "data/RenderPeople_fitsoma"
-  g1_smplx_dir: "data/g1_smplx"
+  human_pose_backend: "gem_x"
+  gem_x_source_root: "imports/GEM-X"
+  gem_x_config_path: "imports/GEM-X/docs/configs/body_video_native77.yaml"
+  gem_x_python: "imports/GEM-X/.venv/bin/python"
+  gem_x_device: cuda
+  gem_x_postprocess: false
+  gem_x_human_crop_repair: true
+  gem_x_human_crop_config:
+    max_crop_scale: 3.0
+    max_mask_image_fraction: 0.65
+    min_box_mask_overlap: 0.10
+    min_support_frames: 2
+    padding_fraction: 0.03
+    smoothing_radius: 2
+  soma_runtime: "gem_x"
+  gem_x_soma_assets: "imports/GEM-X/assets/soma"
+  soma_identity_params_path: "data/body_profiles/unitree_g1/soma/soma03_custom_smplx_identity.npz"
 
 # ── Object pose tracking config ──────────────────────────────────────────────
 obj_pose_tracking:

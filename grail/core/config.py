@@ -4,6 +4,7 @@ import yaml
 
 _PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 _CONFIG_DIR = os.path.join(_PROJECT_ROOT, "configs")
+DEFAULT_RECON_CONFIG = os.path.join(_CONFIG_DIR, "recon_4dhoi", "manip_soma.yaml")
 _DEFAULT_SCENES = os.path.join(_CONFIG_DIR, "scenes", "default.yaml")
 _DEFAULT_OBJECTS = os.path.join(_CONFIG_DIR, "objects", "comasset.yaml")
 _DEFAULT_PIPELINE = os.path.join(_CONFIG_DIR, "gen_2dhoi", "manipulation.yaml")
@@ -99,6 +100,8 @@ _GEN_FLAT_SECTIONS = ["paths", "simulation", "scale", "rendering", "video", "cha
 # Top-level scalar keys that should be included as-is.
 _GEN_TOP_LEVEL_KEYS = [
     "character",
+    "character_usd",
+    "character_scale",
     "character_dir",
     "texture_dir",
     "results_dir",
@@ -151,7 +154,7 @@ _RECON_FLAT_SECTIONS = [
 ]
 
 
-def load_recon_config(cfg_path):
+def load_recon_config(cfg_path=None):
     """Load the unified reconstruction config and return both the full
     structured dict and a flat dict suitable for ``argparse.set_defaults``.
 
@@ -161,7 +164,7 @@ def load_recon_config(cfg_path):
                      ``_RECON_FLAT_SECTIONS``, ready to be used as argparse
                      defaults (CLI flags override these).
     """
-    cfg = load_config(cfg_path)
+    cfg = load_config(cfg_path or DEFAULT_RECON_CONFIG)
     flat = {}
     for section in _RECON_FLAT_SECTIONS:
         flat.update(cfg.get(section, {}))

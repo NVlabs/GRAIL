@@ -37,20 +37,39 @@ class ReconPaths:
 class HumanModelConfig:
     """Body model configuration."""
 
-    body_model: str = "smplx"  # smplx | soma | g1_smplx
+    body_model: str = "soma03"  # Native GEM-X prediction; old types identify archived data
     static_cam: bool = True
     smplx_model_path: str = ""
     smplx_shape_params_path: str = ""
     soma_model_path: str = ""
     soma_shape_params_path: str = ""
+    soma_identity_params_path: str = ""
+    human_pose_backend: str = "gem_x"
+    soma_runtime: str = "gem_x"
+    gem_x_source_root: str = "imports/GEM-X"
+    gem_x_config_path: str = "imports/GEM-X/docs/configs/body_video_native77.yaml"
+    gem_x_python: str = "imports/GEM-X/.venv/bin/python"
+    gem_x_device: str = "cuda"
+    gem_x_postprocess: bool = False
+    gem_x_soma_assets: str | None = None
+    gem_x_human_crop_repair: bool = True
+    gem_x_human_crop_masks: str | None = None
+    gem_x_human_crop_receipt: str | None = None
+    gem_x_human_crop_config: dict | None = None
+    gem_smpl_human_crop_repair: bool = False
+    gem_smpl_human_crop_masks: str | None = None
+    gem_smpl_human_crop_receipt: str | None = None
+    gem_smpl_human_crop_config: dict | None = None
     g1_smplx_params_path: str = ""
     g1_smplx_tpose_mesh_path: str = ""
 
 
 @dataclass
 class ObjPoseTrackingConfig:
-    """FoundationPose object tracking settings."""
+    """Dynamic object initialization settings; static objects bypass tracking."""
 
+    object_tracking_backend: str = "mose3_fp_hybrid"
+    object_tracking_config: str = "configs/object_tracking/mose3_fp_hybrid.yaml"
     foundation_pose_debug: int = 2
     crop_image: bool = False
     interpolation_factor: int = 1
@@ -90,6 +109,8 @@ class VisualizationConfig:
     export_mesh: bool = False
     vis_html: bool = True
     vis_contact: bool = True
+    vis_foot_contact: bool = True
+    foot_contact_threshold: float = 0.4
 
 
 @dataclass

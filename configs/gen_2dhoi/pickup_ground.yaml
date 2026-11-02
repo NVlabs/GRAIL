@@ -1,6 +1,8 @@
-character: kid
-character_dir: data/characters
-texture_dir: data/characters
+character: unitree_g1_dhgen_00008
+character_usd: data/body_profiles/unitree_g1/characters/dhgen_00008/c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd
+character_scale: [0.01, 0.01, 0.01]
+character_dir: data/body_profiles/unitree_g1/characters
+texture_dir: data/body_profiles/unitree_g1/characters
 object_config: configs/objects/robocasa.yaml
 scene: indoor2-pickup-ground
 scene_config: configs/scenes/pickup.yaml

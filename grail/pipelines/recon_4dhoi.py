@@ -2,10 +2,10 @@
 """4D Human-Object Interaction Reconstruction Pipeline.
 
 Steps:
-    1. Human motion prediction (HMR4D)
+    1. Native SOMA03 body/hand prediction (GEM-X, default)
     2. Preprocessing (SAM2 mask tracking + depth estimation)
-    3. Object pose estimation (FoundationPose)
-    4. 4D HOI optimization
+    3. Object pose estimation (MoSE3/FoundationPose hybrid + smoothing)
+    4. 4D HOI optimization with the original contact-label pipeline
     5. Filter & post-process results
     6. Visualize results (ScenePic)
 """
@@ -17,6 +17,7 @@ import shutil
 import sys
 import time
 import traceback
+from functools import partial
 from glob import glob
 from pathlib import Path
 
@@ -25,17 +26,30 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from grail.core.config import load_recon_config
+from grail.core.config import DEFAULT_RECON_CONFIG, load_recon_config
 from grail.core.dataset import category2object
+from grail.core.depth_config import DEPTH_CACHE_SUBDIR, depth_cache_is_current
 from grail.core.io import load_hoi_data, save_hoi_data, save_human_motion_data, vis_keypoints_data
 from grail.core.logging import create_logger
+from grail.core.paths import depth_cache as depth_cache_path
 from grail.core.torch_utils import tensor_to, tensor_to_numpy
-from grail.core.video import concat_videos, extract_frames_from_video
+from grail.core.video import (
+    concat_videos,
+    extract_frames_from_video,
+    get_motion_fps,
+    get_video_fps_and_frame_count,
+)
 from grail.optimization.hoi_optimizer import HOIOptimizer
 from grail.pose_est.human_pose import run_human_pose_est
-from grail.pose_est.object_pose import run_obj_pose_est
+from grail.pose_est.object_pose import StaticObjectValidationError, run_obj_pose_est
 from grail.postprocessing.filter import filter_hoi_result
 from grail.postprocessing.postprocess import post_process_hoi_result
+from grail.preprocessing.depth_frames import ensure_depth_frames
+from grail.preprocessing.human_crop_masks import (
+    ensure_human_crop_masks,
+    masks_prepared_this_invocation,
+    prepare_pipeline_human_crop,
+)
 from grail.preprocessing.preprocess import (
     depth_to_point_cloud,
     load_camera_intrinsics,
@@ -64,7 +78,9 @@ def _origin_id(video_id):
 
 
 def step1_predict_human_motion(video_ids, args):
-    """Step 1: HMR4D human motion prediction."""
+    """Predict the explicitly selected native model, preserving estimated shape."""
+    if args.body_model not in ("soma03", "smplx", "g1_smplx"):
+        raise ValueError("Human prediction requires soma03, smplx or g1_smplx")
     output_dir = f"{args.results_dir}/{args.hmr_dir}"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{args.results_dir}/{args.hmr_cache_dir}", exist_ok=True)
@@ -75,20 +91,40 @@ def step1_predict_human_motion(video_ids, args):
             video_path = f"{args.results_dir}/{args.video_dir}/{video_id}.mp4"
             output_npz = f"{output_dir}/{video_id}.npz"
 
-            if args.skip_done and os.path.exists(output_npz):
-                continue
-
-            # Clear stale HMR cache so estimation runs on the current video
+            # The adapter verifies input/model/timing hashes even with skip_done.
+            # Keep native caches; an existing NPZ alone is not a validity check.
             cache_dir = f"{args.results_dir}/{args.hmr_cache_dir}/{video_id}"
-            if os.path.exists(cache_dir):
-                shutil.rmtree(cache_dir, ignore_errors=True)
+            model_cfg = dict(getattr(args, "cfg", {}).get("human_model", {}))
+            model_cfg["body_model"] = args.body_model
+            for key in (
+                "human_pose_backend",
+                "soma_runtime",
+                "gem_x_source_root",
+                "gem_x_config_path",
+                "gem_x_python",
+                "gem_x_device",
+                "gem_x_postprocess",
+                "gem_x_soma_assets",
+                "gem_x_human_crop_repair",
+                "gem_x_human_crop_masks",
+                "gem_x_human_crop_receipt",
+                "gem_x_human_crop_config",
+                "static_cam",
+                "soma_model_path",
+                "soma_identity_params_path",
+            ):
+                if hasattr(args, key):
+                    model_cfg[key] = getattr(args, key)
+
+            model_cfg = prepare_pipeline_human_crop(
+                video_path, model_cfg, args, video_id, _origin_id(video_id)
+            )
 
             motion_data = run_human_pose_est(
                 video_path,
                 model=args.body_model,
                 cache_dir=cache_dir,
-                smplx_model_path=getattr(args, "smplx_model_path", None),
-                soma_model_path=getattr(args, "soma_model_path", None),
+                human_model_config=model_cfg,
             )
             global_motion = tensor_to_numpy(motion_data["motion_global"])
             incam_motion = tensor_to_numpy(motion_data["motion_incam"])
@@ -119,48 +155,60 @@ def step2_preprocess_data(video_ids, args):
                 continue
 
             masks_cache = f"{args.results_dir}/{args.recon_cache_dir}/masks/{video_id}.npz"
-            depth_cache = f"{args.results_dir}/{args.recon_cache_dir}/depth/{video_id}.pt"
-            masks_done = os.path.exists(masks_cache)
-            depth_done = os.path.exists(depth_cache)
-
-            if args.skip_done and masks_done and depth_done:
-                continue
-
+            depth_cache = depth_cache_path(args.results_dir, args.recon_cache_dir, video_id)
+            masks_prepared = masks_prepared_this_invocation(args, video_id, masks_cache)
             fp_dir = f"{args.results_dir}/{args.foundation_pose_dir}/{video_id_origin}"
-
-            # Track masks
-            if not masks_done or not args.skip_done:
+            # Step 1 already validated the masks used by the pose estimator.
+            # Standalone Step 2 must enforce the same source/seed binding before
+            # calibrating depth, even when an old mask archive already exists.
+            if not masks_prepared:
                 debug_dir = (
                     f"{args.results_dir}/{args.recon_cache_dir}/masks_debug/{video_id}"
                     if args.verbose
                     else None
                 )
-                preprocess_masks(
-                    video_path=video_path,
-                    first_frame_obj_mask_path=f"{fp_dir}/masks/000000.png",
-                    first_frame_human_mask_path=f"{fp_dir}/human_masks/000000.png",
-                    cache_file=masks_cache,
+                ensure_human_crop_masks(
+                    video_path,
+                    masks_cache,
+                    f"{fp_dir}/masks/000000.png",
+                    f"{fp_dir}/human_masks/000000.png",
                     device=args.device,
-                    debug_dir=debug_dir,
+                    force=not args.skip_done,
+                    producer=partial(preprocess_masks, debug_dir=debug_dir),
                 )
+            gt_depth_path = None
+            if args.depth_gt_dir:
+                candidate = f"{args.results_dir}/{args.depth_gt_dir}/{video_id}/000000.png"
+                if os.path.exists(candidate):
+                    gt_depth_path = candidate
+            cam_K_path = f"{fp_dir}/cam_K.txt"
+            intrinsics = cam_K_path if os.path.exists(cam_K_path) else None
+            input_paths = {
+                "source_video": video_path,
+                "masks": masks_cache,
+                "intrinsics": intrinsics,
+                "gt_depth": gt_depth_path,
+                **{
+                    name: path if os.path.exists(path) else None
+                    for name, path in (
+                        ("rendered_object_mask", f"{fp_dir}/masks/000000.png"),
+                        ("rendered_human_mask", f"{fp_dir}/human_masks/000000.png"),
+                    )
+                },
+            }
+            depth_done = depth_cache_is_current(depth_cache, input_paths=input_paths)
+            if args.skip_done and depth_done:
+                continue
 
             # Estimate depth
             if not depth_done or not args.skip_done:
                 video_bn = os.path.basename(video_path).replace(".mp4", "")
-                frame_dir = os.path.join(os.path.dirname(video_path), "frames", video_bn)
-                if not os.path.exists(frame_dir) or len(glob(f"{frame_dir}/*.jpg")) == 0:
-                    os.makedirs(frame_dir, exist_ok=True)
-                    extract_frames_from_video(video_path, frame_dir, image_format="jpg")
-
-                image_list = sorted(glob(f"{frame_dir}/*.jpg")) or sorted(
-                    glob(f"{frame_dir}/*.png")
+                # Keep the lossless MoGe-3 inputs separate from legacy JPEG frames.
+                frame_dir = os.path.join(
+                    os.path.dirname(video_path), "frames", video_bn, DEPTH_CACHE_SUBDIR
                 )
-
-                gt_depth_path = None
-                if args.depth_gt_dir:
-                    candidate = f"{args.results_dir}/{args.depth_gt_dir}/{video_id}/000000.png"
-                    if os.path.exists(candidate):
-                        gt_depth_path = candidate
+                _, expected_frames = get_video_fps_and_frame_count(video_path)
+                image_list = ensure_depth_frames(video_path, frame_dir, expected_frames)
 
                 video_masks = None
                 if os.path.exists(masks_cache):
@@ -177,9 +225,6 @@ def step2_preprocess_data(video_ids, args):
                 first_obj_mask = _load_mask(f"{fp_dir}/masks/000000.png")
                 first_human_mask = _load_mask(f"{fp_dir}/human_masks/000000.png")
 
-                cam_K_path = f"{fp_dir}/cam_K.txt"
-                intrinsics = cam_K_path if os.path.exists(cam_K_path) else None
-
                 depth_list = preprocess_depth(
                     image_list=image_list,
                     cache_file=depth_cache,
@@ -189,12 +234,12 @@ def step2_preprocess_data(video_ids, args):
                     first_frame_human_mask=first_human_mask,
                     intrinsics=intrinsics,
                     device=args.device,
+                    source_video_path=video_path,
+                    input_paths=input_paths,
                 )
 
                 if args.verbose and intrinsics:
-                    depth_debug_dir = (
-                        f"{args.results_dir}/{args.recon_cache_dir}/depth_debug/{video_id}"
-                    )
+                    depth_debug_dir = f"{args.results_dir}/{args.recon_cache_dir}/{DEPTH_CACHE_SUBDIR}_debug/{video_id}"
                     visualize_depth_as_point_cloud(
                         depth_list=depth_list,
                         image_list=image_list,
@@ -223,7 +268,7 @@ def step2_preprocess_data(video_ids, args):
 
 
 def step3_obj_pose_estimation(video_ids, args):
-    """Step 3: FoundationPose object tracking."""
+    """Step 3: default hybrid object initialization or validated static poses."""
     for video_id in tqdm(sorted(video_ids), desc="Step 3 — Object pose"):
         try:
             video_id = _strip_mp4(video_id)
@@ -231,6 +276,11 @@ def step3_obj_pose_estimation(video_ids, args):
 
             out_dir = f"{args.results_dir}/{args.foundation_pose_output_dir}/{video_id}"
             failed_marker = f"{out_dir}/failed"
+            recon_dir = Path(args.results_dir) / args.output_dir / video_id
+            invalid_marker = recon_dir / "invalid"
+            motion_rejection_marker = recon_dir / "unexpected_object_motion"
+            valid_dir = Path(f"{args.results_dir}/{args.output_dir}_valid") / video_id
+            had_motion_rejection = motion_rejection_marker.exists()
             if args.skip_done and (
                 os.path.exists(f"{out_dir}/pose_estimation_output/poses_in_cam.pkl")
                 or os.path.exists(failed_marker)
@@ -253,22 +303,55 @@ def step3_obj_pose_estimation(video_ids, args):
             video_masks = load_masks_from_cache(masks_cache)
 
             fp_input = f"{args.results_dir}/{args.foundation_pose_dir}/{video_id_origin}"
-            shutil.rmtree(out_dir, ignore_errors=True)
+            if (
+                os.path.exists(out_dir)
+                and getattr(args, "object_tracking_backend", "mose3_fp_hybrid") == "mose3_fp_hybrid"
+            ):
+                # A requested rerun keeps every previous raw/processed result.
+                import time
+
+                previous = f"{out_dir}.previous-{time.time_ns()}"
+                os.rename(out_dir, previous)
+                print(f"  Preserved previous object initialization: {previous}")
+            else:
+                shutil.rmtree(out_dir, ignore_errors=True)
             shutil.copytree(fp_input, out_dir)
 
-            success = run_obj_pose_est(
-                video_path=video_file,
-                mesh_file=mesh_file,
-                input_dir=out_dir,
-                video_masks=video_masks,
-                debug=args.foundation_pose_debug,
-                crop_image=args.crop_image,
-                interpolation_factor=args.interpolation_factor,
-                is_static=args.is_static_obj,
-            )
+            try:
+                success = run_obj_pose_est(
+                    video_path=video_file,
+                    mesh_file=mesh_file,
+                    input_dir=out_dir,
+                    video_masks=video_masks,
+                    debug=args.foundation_pose_debug,
+                    crop_image=args.crop_image,
+                    interpolation_factor=args.interpolation_factor,
+                    is_static=args.is_static_obj,
+                    object_tracking_backend=getattr(
+                        args, "object_tracking_backend", "mose3_fp_hybrid"
+                    ),
+                    object_tracking_config=getattr(
+                        args,
+                        "object_tracking_config",
+                        "configs/object_tracking/mose3_fp_hybrid.yaml",
+                    ),
+                )
+            except StaticObjectValidationError as exc:
+                reason = f"unexpected_object_motion: {exc}"
+                Path(failed_marker).write_text(f"{reason}\n")
+                recon_dir.mkdir(parents=True, exist_ok=True)
+                invalid_marker.write_text(f"{reason}\n")
+                motion_rejection_marker.write_text(f"{reason}\n")
+                if valid_dir.exists():
+                    shutil.rmtree(valid_dir)
+                print(f"  Rejected (step3) {video_id}: {exc}")
+                continue
 
             if not success:
                 open(failed_marker, "w").close()
+            elif had_motion_rejection:
+                motion_rejection_marker.unlink(missing_ok=True)
+                invalid_marker.unlink(missing_ok=True)
 
         except Exception as e:
             print(f"  Error (step3) {video_id}: {e}\n{traceback.format_exc()}")
@@ -280,6 +363,13 @@ def step4_optimize_4dhoi(video_ids, args):
         try:
             video_id = _strip_mp4(video_id)
             output_dir = os.path.join(args.results_dir, args.output_dir, video_id)
+            failed_marker = (
+                f"{args.results_dir}/{args.foundation_pose_output_dir}/{video_id}/failed"
+            )
+
+            if os.path.exists(failed_marker):
+                print(f"  Skipping step4 {video_id}: object pose estimation failed")
+                continue
 
             if args.skip_done and os.path.exists(f"{output_dir}/hoi_data.pkl"):
                 continue
@@ -341,6 +431,14 @@ def step5_filter_hoi_result(video_ids, args):
             video_id = _strip_mp4(video_id)
             invalid_marker = f"{args.results_dir}/{args.output_dir}/{video_id}/invalid"
             valid_dir = f"{args.results_dir}/{args.output_dir}_valid/{video_id}"
+            motion_rejection_marker = (
+                f"{args.results_dir}/{args.output_dir}/{video_id}/unexpected_object_motion"
+            )
+
+            if os.path.exists(motion_rejection_marker):
+                if os.path.exists(valid_dir):
+                    shutil.rmtree(valid_dir)
+                continue
 
             if args.skip_done and (
                 os.path.exists(f"{valid_dir}/hoi_data/hoi_data.pkl")
@@ -358,6 +456,10 @@ def step5_filter_hoi_result(video_ids, args):
             result_camera = torch.load(cam_file) if os.path.exists(cam_file) else None
 
             hoi_data = load_hoi_data(hoi_file)
+            source_video = f"{args.results_dir}/{args.video_dir}/{video_id}.mp4"
+            if os.path.exists(source_video):
+                source_fps, _ = get_video_fps_and_frame_count(source_video)
+                hoi_data["human_data"]["mocap_frame_rate"] = source_fps
             num_total += 1
             num_frames_total += hoi_data["human_data"]["poses"].shape[0]
             if not hoi_data.get("success", True):
@@ -438,11 +540,19 @@ def step5_filter_hoi_result(video_ids, args):
                 from grail.models.human_model import create_human_model
 
                 human_model = create_human_model(args.cfg["human_model"], device=args.device)
+                if human_model.model_type == "soma03":
+                    human_model.load_shape_params(args.cfg["human_model"], None, args.device)
                 vis_input = prep_visualizer_input(
-                    hoi_processed, human_model=human_model, device=args.device
+                    hoi_processed,
+                    human_model=human_model,
+                    normalize_trans=False,
+                    device=args.device,
                 )
                 sp_vis.vis_scene(
-                    vis_input, f"{result_dir}/recon_result.html", window_size=(400, 400), fps=16
+                    vis_input,
+                    f"{result_dir}/recon_result.html",
+                    window_size=(400, 400),
+                    fps=get_motion_fps(hoi_processed),
                 )
             else:
                 open(invalid_marker, "w").close()
@@ -478,13 +588,22 @@ def step6_visualize_hoi_result(video_ids, args):
             hoi_data = pickle.load(
                 open(f"{args.results_dir}/{args.output_dir}/{video_id}/hoi_data.pkl", "rb")
             )
+            source_video = f"{args.results_dir}/{args.video_dir}/{video_id}.mp4"
+            if os.path.exists(source_video):
+                source_fps, _ = get_video_fps_and_frame_count(source_video)
+                hoi_data["human_data"]["mocap_frame_rate"] = source_fps
             dataset, category = video_id.split("/")[:2]
             hoi_data["object_path"] = category2object(
                 f"{args.results_dir}/generation/mesh/{dataset}", category
             )
-            vis_input = prep_visualizer_input(hoi_data)
+            vis_input = prep_visualizer_input(hoi_data, normalize_trans=False)
             os.makedirs(os.path.dirname(html_file), exist_ok=True)
-            sp_vis.vis_scene(vis_input, html_file, window_size=(400, 400), fps=16)
+            sp_vis.vis_scene(
+                vis_input,
+                html_file,
+                window_size=(400, 400),
+                fps=get_motion_fps(hoi_data),
+            )
 
         except Exception as e:
             print(f"  Error (step6) {video_id}: {e}\n{traceback.format_exc()}")
@@ -507,7 +626,7 @@ _STEPS = [
 def main():
     """Entry point for the 4D HOI reconstruction pipeline."""
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--config", type=str, default="configs/recon_4dhoi/manip_smplx.yaml")
+    pre.add_argument("--config", type=str, default=DEFAULT_RECON_CONFIG)
     pre_args, _ = pre.parse_known_args()
 
     cfg, cfg_flat = load_recon_config(pre_args.config)
@@ -533,6 +652,14 @@ def main():
     parser.add_argument("--skip_done", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--is_static_obj", action="store_true")
+    parser.add_argument(
+        "--object_tracking_backend",
+        choices=["mose3_fp_hybrid", "foundationpose"],
+        default="mose3_fp_hybrid",
+    )
+    parser.add_argument(
+        "--object_tracking_config", default="configs/object_tracking/mose3_fp_hybrid.yaml"
+    )
 
     parser.set_defaults(**cfg_flat)
     args = parser.parse_args()

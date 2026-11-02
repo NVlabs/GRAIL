@@ -15,7 +15,6 @@ Requirements:
     - CUDA-compatible GPU for NVIDIA cards or OpenCL for AMD/other GPUs
 """
 
-
 import argparse
 import glob
 import hashlib
@@ -27,10 +26,6 @@ import shutil
 import sys
 import time
 from pathlib import Path
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import bpy  # isort: skip  # must be imported before bmesh
 import bmesh
@@ -53,23 +48,40 @@ def main():
     parser = argparse.ArgumentParser(description="Render Blender scene using GPU")
 
     # Input/Output arguments
-    parser.add_argument("--dataset", type=str, default="ComAsset",
-                        help="Dataset name. Meshes are looked up under data/<dataset>/<category>/.")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="ComAsset",
+        help="Dataset name. Meshes are looked up under data/<dataset>/<category>/.",
+    )
     parser.add_argument("--category", type=str, default="barbell", help="Object category")
     parser.add_argument(
         "--character_name", type=str, default=None, help="Character name (use 'G1' for G1 robot)"
     )
     parser.add_argument(
+        "--character_usd",
+        type=str,
+        default=None,
+        help="Exact USD character asset; bypass name matching",
+    )
+    parser.add_argument(
+        "--character_scale",
+        type=float,
+        nargs=3,
+        default=None,
+        help="Override external character scale (meter USD: 1 1 1)",
+    )
+    parser.add_argument(
         "--character_dir",
         type=str,
-        default="data/RenderPeople",
-        help="Root directory containing RenderPeople USD character folders",
+        default="data/body_profiles/unitree_g1/characters",
+        help="Root directory containing character USD folders",
     )
     parser.add_argument(
         "--texture_dir",
         type=str,
-        default="data/RenderPeople/diffuseTextures",
-        help="Directory containing RenderPeople diffuse texture files",
+        default="data/body_profiles/unitree_g1/characters",
+        help="Directory containing character textures",
     )
     parser.add_argument(
         "--g1_xml_path",
@@ -222,6 +234,12 @@ def main():
     if "--" in argv:
         argv = argv[argv.index("--") + 1 :]
     args = parser.parse_args(argv)
+    if args.character_usd and (not args.character_name or args.character_name == "G1"):
+        parser.error("--character_usd requires a non-G1 --character_name output identifier")
+    if args.character_scale is not None and any(
+        not math.isfinite(value) or value <= 0 for value in args.character_scale
+    ):
+        parser.error("--character_scale must contain three finite positive numbers")
 
     if args.scene_config:
         SCENE_CONFIG = load_scene_config(args.scene_config)
@@ -345,9 +363,19 @@ def main():
         # Override scene config with object-specific config if available.
         # Whitelist of fields the per-object yaml is allowed to override on the scene.
         _OBJ_CONFIG_OVERRIDES = (
-            "obj_rot", "obj_pos", "obj_scale", "obj_opacity", "obj_rot_rand_max",
-            "character_pos", "character_rot", "character_rot_rand_max",
-            "camera_radius", "camera_azimuth", "camera_elevation", "camera_offset",
+            "obj_rot",
+            "obj_pos",
+            "obj_scale",
+            "obj_opacity",
+            "obj_rot_rand_max",
+            "character_pos",
+            "character_rot",
+            "character_rot_rand_max",
+            "character_scale",
+            "camera_radius",
+            "camera_azimuth",
+            "camera_elevation",
+            "camera_offset",
         )
         if obj_config is not None:
             for key in _OBJ_CONFIG_OVERRIDES:
@@ -422,7 +450,7 @@ def main():
                 print_object_dimensions(obj)
 
         if args.character_name is not None:
-            character_scale = scene_config["character_scale"]
+            character_scale = args.character_scale or scene_config["character_scale"]
             rand_seed = args.rand_scene_seed
             if scene_config.get("character_pos_mode") == "polar":
                 character_position, character_rotation = compute_polar_character_placement(
@@ -443,10 +471,11 @@ def main():
                     rotation=character_rotation,
                 )
             else:
-                # Load the RenderPeople character
-                # The RenderPeople models are in centimeters (about 570 cm = 5.7m tall)
+                # Load the selected rigged character. DHGen assets use centimetres,
+                # so the public G1 profile supplies scale 0.01 explicitly.
                 loaded_character = load_renderpeople_from_name(
                     args.character_name,
+                    usd_file_path=args.character_usd,
                     position=character_position,
                     rotation=character_rotation,
                     scale=character_scale,
@@ -604,20 +633,13 @@ def main():
                         for i in range(3):
                             loaded_character.rotation_euler[i] += math.radians(offsets[i])
 
-                if scene_config.get("same_obj_state", False):
-                    # Use deterministic RNG for object pos/rot so it stays consistent across phases
-                    obj_rng = random.Random(combined_seed)
-                else:
-                    obj_rng = random
                 if "obj_pos_rand_max" in scene_config:
-                    rng_range = rand_range_3d(scene_config, "obj_pos_rand_max", "obj_pos_rand_min")
-                    offsets = [obj_rng.uniform(r[0], r[1]) for r in rng_range]
+                    offsets = sample_rand_3d(scene_config, "obj_pos_rand_max", "obj_pos_rand_min")
                     for i in range(3):
                         loaded_obj.location[i] += offsets[i]
                     print(f"Object position randomized: {loaded_obj.location}")
                 if "obj_rot_rand_max" in scene_config:
-                    rng_range = rand_range_3d(scene_config, "obj_rot_rand_max", "obj_rot_rand_min")
-                    offsets = [obj_rng.uniform(r[0], r[1]) for r in rng_range]
+                    offsets = sample_rand_3d(scene_config, "obj_rot_rand_max", "obj_rot_rand_min")
                     for i in range(3):
                         loaded_obj.rotation_euler[i] += math.radians(offsets[i])
                     print(
@@ -670,6 +692,7 @@ def main():
             obj=loaded_obj,
             character=loaded_character,
             static_objects=loaded_static_objects,
+            support_object_names=scene_config.get("support_object_names"),
             frame_height=args.height,
             frame_width=args.width,
             focal_length=FOCAL_LENGTH,

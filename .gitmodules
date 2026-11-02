@@ -11,9 +11,6 @@
 	path = imports/GEM-SMPL
 	url = https://github.com/NVlabs/GENMO
 	branch = grail
-[submodule "imports/GEM-SOMA"]
-	path = imports/GEM-SOMA
-	url = https://github.com/NVlabs/GEM-X
 [submodule "imports/GMR"]
 	path = imports/GMR
 	url = https://github.com/YanjieZe/GMR.git
@@ -21,3 +18,12 @@
 	path = imports/Sana
 	url = https://github.com/NVlabs/Sana.git
 	branch = sol-engine
+[submodule "imports/GEM-X"]
+	path = imports/GEM-X
+	url = https://github.com/NVlabs/GEM-X.git
+[submodule "imports/MoSE3"]
+	path = imports/MoSE3
+	url = https://github.com/mose3-tracker/MoSE3.git
+[submodule "imports/soma-retargeter"]
+	path = imports/soma-retargeter
+	url = https://github.com/NVIDIA/soma-retargeter.git

@@ -19,6 +19,32 @@ Underneath, both call the same two Python modules:
 `grail.visualization.batch_render_replay` (single IsaacSim session, one MP4
 per motion).
 
+## Native SOMA G1+DEx3 scene replay
+
+Default SOMA retargeting first emits a 50-column G1+DEx3 CSV rather than the
+packaged motion-library layout described below. Inspect that intermediate result
+with the source-bound target and the same validated `hoi_data.pkl`:
+
+```bash
+export DISPLAY=:1
+RETARGET_DIR=<retarget_output_directory>
+
+imports/soma-retargeter/.venv/bin/python -m grail.retargeting.soma_replay \
+    "$RETARGET_DIR/g1_retarget/csv/source.csv" \
+    <path/to/hoi_data.pkl> \
+    "$RETARGET_DIR/g1_dex3_target" \
+    "$RETARGET_DIR/g1_dex3_scene.mp4"
+```
+
+This renderer refuses 29-joint/padded CSVs. It loads all 43 native robot joints,
+the reconstructed object mesh and scale, and the per-frame object trajectory.
+For visualization it creates a `2.0 x 0.6 x 0.04 m` tabletop with four legs,
+centered below the initial object pose and placed at the scaled/rotated mesh's
+minimum height. Use `--table-size WIDTH DEPTH THICKNESS` to override the
+dimensions. It is a kinematic geometry/alignment review, not a physics or
+grasp-success test. Once a motion is accepted and packaged into `robot/`,
+`objects/`, and `object_usd/`, use the IsaacLab batch renderer below.
+
 ## Input layout
 
 The visualizer expects any directory shaped like:
@@ -35,7 +61,7 @@ Three layouts in the wild all satisfy this:
 
 | Layout | Producer | Quat convention | Hand DOFs |
 |---|---|---|---|
-| `data/motion_lib/<name>/` | retargeting pipeline (`grail.retargeting.retarget`) | **wxyz** | none |
+| `data/motion_lib/<name>/` | legacy SMPL-X/GMR retargeting pipeline (`grail.retargeting.retarget`) | **wxyz** | none |
 | `logs_rl/<exp>/exported/step_*/shard_*/` | data-export pipeline (`grail.data_export.export_successful_rollouts`) | **xyzw** | `hand_dof_pos: (T, 14)` |
 | `data/<name>/` | released dataset | **xyzw** | inherited from exported data |
 

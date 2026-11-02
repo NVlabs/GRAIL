@@ -84,6 +84,10 @@ class HumanModel(ABC):
 
     # ---- joint extraction --------------------------------------------------
 
+    def get_native_joints(self, motion_data: dict, *, require_grad: bool = False) -> torch.Tensor:
+        """Full model joints in world coordinates, not a 2D-observation subset."""
+        return self.generate_mesh(motion_data, output_joints=True, require_grad=require_grad)[2]
+
     @abstractmethod
     def get_body_joints(self, motion_data: dict, *, require_grad: bool = False) -> torch.Tensor: ...
 
@@ -551,6 +555,14 @@ class SmplxHumanModel(HumanModel):
 
     # -- joints --------------------------------------------------------------
 
+    def get_native_joints(self, motion_data, *, require_grad=False):
+        # SMPL-X appends face/mesh landmarks after its 55 articulated joints.
+        # The all-joint motion prior uses the skeleton, not those regressors.
+        joints = self.generate_mesh(motion_data, output_joints=True, require_grad=require_grad)[2]
+        if joints.ndim != 3 or joints.shape[1] < 55 or joints.shape[-1] != 3:
+            raise ValueError("SMPL-X native skeleton requires at least 55 XYZ joints")
+        return joints[:, :55]
+
     def get_body_joints(self, motion_data, *, require_grad=False):
         from grail.models.smplx_model import get_coco17_joints
 
@@ -662,18 +674,22 @@ def create_human_model(cfg, device="cuda"):
     """Create a HumanModel instance based on config.
 
     Args:
-        cfg: Config dict with ``body_model`` key (``"smplx"`` | ``"soma"`` | ``"g1_smplx"``).
+        cfg: Config dict with ``body_model`` key (``"smplx"`` | ``"soma"`` | ``"soma03"`` | ``"g1_smplx"``).
         device: Target torch device.
 
     Returns:
-        (human_model, body_model_type) tuple.
+        HumanModel instance.
     """
-    from grail.models.g1_smplx_human import G1SmplxHumanModel
+    body_model_type = cfg.get("body_model", "soma03")
+    if body_model_type == "soma03":
+        from grail.models.soma03_model import Soma03HumanModel
 
-    body_model_type = cfg.get("body_model", "smplx")
-    if body_model_type == "soma":
+        return Soma03HumanModel(cfg, device)
+    elif body_model_type == "soma":
         return SomaHumanModel(cfg, device)
     elif body_model_type == "g1_smplx":
+        from grail.models.g1_smplx_human import G1SmplxHumanModel
+
         return G1SmplxHumanModel(cfg, device)
     elif body_model_type == "smplx":
         return SmplxHumanModel(cfg, device)

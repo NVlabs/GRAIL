@@ -142,10 +142,13 @@ class HOIVisualizer:
                 data,
             )
 
-            # Build static object meshes
-            static_object_meshes = self._build_static_meshes(motion_seq)
-
             for view_name, view_cam, view_renderer in extra_views:
+                # A table obscures the human-object interaction from above and
+                # adds no useful context there. Keep every other static scene
+                # object, and retain tables in side/front views.
+                static_object_meshes = self._build_static_meshes(
+                    motion_seq, exclude_tables=view_name == "top_view"
+                )
                 self._render_video(
                     os.path.join(vis_dir, f"{vis_name}_{view_name}.mp4"),
                     frame_num,
@@ -411,12 +414,21 @@ class HOIVisualizer:
             extra_views.append((f"{vname}_view", cam, view_renderer))
         return extra_views
 
-    def _build_static_meshes(self, motion_seq):
+    def _build_static_meshes(self, motion_seq, exclude_tables=False):
         """Build static object meshes (e.g. table) from motion_seq data."""
         static_meshes = []
         table_color = [0.7, 0.7, 0.7]
         for seq_key in motion_seq.keys():
             if seq_key.startswith("static_") and seq_key.endswith("_seq"):
+                object_key = seq_key[len("static_") : -len("_seq")]
+                normalized_key = object_key.lower()
+                is_table = (
+                    normalized_key == "table"
+                    or normalized_key.startswith("table")
+                    or normalized_key.endswith("_table")
+                )
+                if exclude_tables and is_table:
+                    continue
                 static_seq = motion_seq[seq_key]
                 static_verts = tensor_to(static_seq["vertices"], device=self.device)
                 static_faces = tensor_to(static_seq["triangles"], device=self.device)

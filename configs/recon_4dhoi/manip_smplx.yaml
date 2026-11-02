@@ -17,7 +17,7 @@ paths:
   hmr_dir: "generation/hmr_smplx"
   hmr_cache_dir: "generation/hmr_smplx_cache"
   foundation_pose_dir: "generation/foundation_pose"
-  foundation_pose_output_dir: "generation/foundation_pose_output"
+  foundation_pose_output_dir: "generation/object_pose_mose3_fp"
   recon_cache_dir: "generation/4dhoi_recon_cache"
   depth_gt_dir: "generation/depth_maps"
   output_dir: "generation/4dhoi_recon_smplx"
@@ -27,14 +27,26 @@ paths:
 human_model:
   body_model: "g1_smplx" # smplx | soma | g1_smplx
   static_cam: true
+  gem_smpl_human_crop_repair: true
+  gem_smpl_human_crop_config:
+    max_crop_scale: 3.0
+    max_mask_image_fraction: 0.65
+    min_box_mask_overlap: 0.10
+    min_support_frames: 2
+    padding_fraction: 0.03
+    smoothing_radius: 2
+    temporal_size_floor_ratio: 0.9
+    temporal_size_radius: 32
+    temporal_size_min_support: 2
+    temporal_size_center_tolerance: 0.5
   smplx_model_path: "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz"
-  smplx_shape_params_path: "data/RenderPeople_fitsmpl"
-  soma_model_path: "imports/GEM-SOMA/inputs/mhr_data/mhr_model.pt"
-  soma_shape_params_path: "data/RenderPeople_fitsoma"
-  g1_smplx_dir: "data/g1_smplx"  # contains g1_smplx_param.npz and g1_smplx_tpose.obj
+  smplx_shape_params_path: "data/body_profiles/unitree_g1/smplx"
+  g1_smplx_dir: "data/body_profiles/unitree_g1/smplx"
 
 # ── Object pose tracking config ──────────────────────────────────────────────
 obj_pose_tracking:
+  object_tracking_backend: mose3_fp_hybrid
+  object_tracking_config: configs/object_tracking/mose3_fp_hybrid.yaml
   foundation_pose_debug: 2
   crop_image: false
   interpolation_factor: 1

@@ -54,9 +54,9 @@ Pipeline at a glance
            →  Blender + Kling AI / MiniMax-H3 HOI videos
            ↓
    python -m grail.pipelines.recon_4dhoi
-           →  SMPL-X body + object 4D trajectories
+           →  GEM-X native SOMA + MoGe-3 depth + hybrid object trajectories
            ↓
-   imports/GMR (retarget)               →  Unitree G1 joint trajectories
+   imports/soma-retargeter + GMR MJCF   →  Unitree G1+DEx3 joint trajectories
            ↓
    imports/SONIC                        →  Task-general tracking policy training
 
@@ -106,16 +106,16 @@ Bundled Dependencies
      - RL training, inference, deploy stack
    * - ``imports/GMR``
      - `YanjieZe/GMR <https://github.com/YanjieZe/GMR>`_
-     - SMPL-X → robot retargeting engine
-   * - ``imports/GEM-SMPL``, ``imports/GEM-SOMA``
-     - NVLabs GENMO / GEM-X
-     - Human pose estimation
-   * - ``imports/FoundationPose``
-     - `NVlabs/FoundationPose <https://github.com/NVlabs/FoundationPose>`_
-     - Object 6-DOF tracking
+     - Legacy SMPL-X → robot retargeting engine
+   * - ``imports/GEM-X``, ``imports/soma-retargeter``
+     - `NVlabs/GEM-X <https://github.com/NVlabs/GEM-X>`_ / `NVIDIA SOMA Retargeter <https://github.com/NVIDIA/soma-retargeter>`_
+     - Native SOMA prediction and source-bound SOMA → Unitree G1+DEx3 retargeting
+   * - ``imports/MoSE3``, ``imports/FoundationPose``
+     - `MoSE3 <https://github.com/mose3-tracker/MoSE3>`_ / `NVlabs/FoundationPose <https://github.com/NVlabs/FoundationPose>`_
+     - Hybrid object 6-DOF tracking
    * - ``imports/MoGe``, ``imports/Hunyuan3D-2.1``
      - Microsoft, Tencent
-     - Monocular depth + 3D asset generation
+     - MoGe-3 monocular depth + 3D asset generation
    * - ``imports/Sana``
      - `NVlabs/Sana <https://github.com/NVlabs/Sana>`_
      - MiniMax-H3 video generation through Sol-Engine

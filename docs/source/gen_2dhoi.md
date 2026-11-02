@@ -13,9 +13,15 @@ stage does not have a project-root wrapper script.
 ```bash
 python -m grail.pipelines.gen_2dhoi \
     --dataset ComAsset --category cordless_drill \
-    --character kid \
     --results_dir results --video_model_api kling-ai
 ```
+
+The default config uses the bundled Unitree-G1 DHGen character
+`unitree_g1_dhgen_00008` at its authored `0.01` import scale. Its exact USD,
+textures, and manifest live under
+`data/body_profiles/unitree_g1/characters/dhgen_00008/`; no legacy character
+asset is required. Use `--character_usd`, `--character`, and
+`--character_scale` only to select an explicit custom character.
 
 Outputs:
 
@@ -78,12 +84,12 @@ Outputs:
 ```bash
 # Skip simulation (cached) and scale (already in obj_scale.json)
 python -m grail.pipelines.gen_2dhoi --dataset ComAsset --category cordless_drill \
-    --character kid --skip_step1 --skip_step2 \
+    --skip_step1 --skip_step2 \
     --results_dir results
 
 # Render only — no Kling video gen
 python -m grail.pipelines.gen_2dhoi --dataset ComAsset --category cordless_drill \
-    --character kid --skip_step1 --skip_step2 --skip_step4 \
+    --skip_step1 --skip_step2 --skip_step4 \
     --results_dir results
 
 # Use a custom config (e.g., terrain stairs)
@@ -201,11 +207,11 @@ launcher mode `dense`, `quality`, or `fast`; the default
 
 ### Container and scheduler use
 
-Use the MiniMax-enabled runtime image; the standard `:1.1.1`/`:latest` image
+Use the MiniMax-enabled runtime image; the standard `:1.2.0`/`:latest` image
 intentionally omits SGLang:
 
 ```bash
-export GRAIL_IMAGE=docker.io/nvgrail/grail:1.1.1-minimax-h3
+export GRAIL_IMAGE=docker.io/nvgrail/grail:1.2.0-minimax-h3
 export MINIMAX_H3_CHECKPOINT=/absolute/path/to/MiniMax-H3/FL2VA
 
 docker pull "$GRAIL_IMAGE"

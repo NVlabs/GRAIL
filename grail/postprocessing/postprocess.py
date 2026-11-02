@@ -69,6 +69,8 @@ def post_process_hoi_result(hoi_data, mesh_data_dir, cfg):
 
     # Setup body model
     human_model = create_human_model(human_model_cfg, device=device)
+    if human_model.model_type == "soma03":
+        human_model.load_shape_params(human_model_cfg, None, device)
     if human_model.model_type == "g1_smplx":
         motion_data["scale"] = 1.0
 

@@ -113,9 +113,9 @@ merged/
 └── export_manifest.json      counts + checkpoint provenance
 ```
 
-The layout is byte-identical to what the
-[retargeting pipeline](retargeting.md) writes under
-`data/motion_lib/<name>/`, so a merged-export motion library is a
+The layout is byte-identical to the established GRAIL/legacy-GMR motion library
+written under `data/motion_lib/<name>/`; it is not the raw CSV emitted by the
+default SOMA Retargeter. A merged-export motion library is therefore a
 drop-in replacement for any training config's
 `motion_lib_cfg.motion_file` / `object_motion_file` /
 `object_usd_path`.

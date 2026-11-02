@@ -1,7 +1,7 @@
 """G1-proportioned SMPL-X model — `G1ProportionSMPLX`.
 
-Loads a pre-baked T-pose mesh (`data/g1_smplx/g1_smplx_tpose.obj`) and a
-reference scale (`data/g1_smplx/g1_smplx_param.npz`) into the standard SMPL-X
+Loads a pre-baked T-pose mesh and reference scale from
+`data/body_profiles/unitree_g1/smplx/` into the standard SMPL-X
 model so its FK output is G1-proportioned without any post-hoc joint
 adjustment. Used by:
 
@@ -77,9 +77,9 @@ class G1ProportionSMPLX:
     def from_g1_smplx_dir(
         cls,
         smplx_model_path: str,
-        g1_smplx_dir: str = "data/g1_smplx",
+        g1_smplx_dir: str = "data/body_profiles/unitree_g1/smplx",
     ) -> "G1ProportionSMPLX":
-        """Load pre-baked Jason params + T-pose mesh from `<repo>/data/g1_smplx/`.
+        """Load pre-baked params and T-pose mesh from the G1 SMPL-X body profile.
 
         Reads `g1_smplx_param.npz` for the reference scale and
         `g1_smplx_tpose.obj` for the v_template.

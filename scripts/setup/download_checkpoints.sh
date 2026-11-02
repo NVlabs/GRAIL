@@ -4,12 +4,13 @@
 #
 # Usage:
 #   bash scripts/setup/download_checkpoints.sh
-#   bash scripts/setup/download_checkpoints.sh --skip-gem-smpl --skip-gem-soma
+#   bash scripts/setup/download_checkpoints.sh --skip-gem-smpl --skip-gem-x
 #   bash scripts/setup/download_checkpoints.sh --force   # re-download even if exists
 #
 # Sources:
 #   GEM-SMPL       — HuggingFace nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL  (checkpoint/GEM-SMPL/...)
-#   GEM-SOMA       — HuggingFace nvidia/GEM-X + nvidia/soma-x
+#   GEM-X          — HuggingFace nvidia/GEM-X + nvidia/SOMA-X
+#   MoSE3          — HuggingFace JoannaCCCCCC/MoSE3 (pinned release)
 #   FoundationPose — HuggingFace nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL  (checkpoint/FoundationPose/...)
 #   Hunyuan3D      — GitHub release (RealESRGAN); shape/paint auto-download from HF
 #   SONIC          — HuggingFace nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL  (checkpoint/SONIC/models/...)
@@ -35,7 +36,8 @@ section() { echo -e "\n${CYAN}── $1 ──${NC}"; }
 
 # ── Parse arguments ────────────────────────────────────────────────────────
 SKIP_GEM_SMPL=false
-SKIP_GEM_SOMA=false
+SKIP_GEM_X=false
+SKIP_MOSE3=false
 SKIP_FOUNDATIONPOSE=false
 SKIP_HUNYUAN3D=false
 SKIP_SONIC=false
@@ -44,7 +46,9 @@ FORCE=false
 for arg in "$@"; do
     case "$arg" in
         --skip-gem-smpl)       SKIP_GEM_SMPL=true ;;
-        --skip-gem-soma)       SKIP_GEM_SOMA=true ;;
+        --skip-gem-x)          SKIP_GEM_X=true ;;
+        --skip-gem-soma)       SKIP_GEM_X=true ;; # backwards-compatible alias
+        --skip-mose3)          SKIP_MOSE3=true ;;
         --skip-foundationpose) SKIP_FOUNDATIONPOSE=true ;;
         --skip-hunyuan3d)      SKIP_HUNYUAN3D=true ;;
         --skip-sonic)          SKIP_SONIC=true ;;
@@ -54,7 +58,8 @@ for arg in "$@"; do
             echo ""
             echo "Options:"
             echo "  --skip-gem-smpl        Skip GEM-SMPL checkpoint download"
-            echo "  --skip-gem-soma        Skip GEM-SOMA checkpoint download"
+            echo "  --skip-gem-x           Skip GEM-X checkpoint download"
+            echo "  --skip-mose3           Skip MoSE3 object-tracking checkpoint download"
             echo "  --skip-foundationpose  Skip FoundationPose weight download"
             echo "  --skip-hunyuan3d       Skip Hunyuan3D-2.1 checkpoint download"
             echo "  --skip-sonic           Skip SONIC base + reference checkpoint download"
@@ -67,30 +72,6 @@ for arg in "$@"; do
 done
 
 # ── Helper: download from HuggingFace ──────────────────────────────────────
-hf_download() {
-    local repo_id="$1"
-    local filename="$2"
-    local local_dir="$3"
-    local local_path="$local_dir/$filename"
-
-    if [ -f "$local_path" ] && [ "$FORCE" = false ]; then
-        ok "$filename (already exists)"
-        return
-    fi
-
-    mkdir -p "$local_dir"
-    echo "  Downloading $filename from $repo_id..."
-    python3 -c "
-from huggingface_hub import hf_hub_download
-hf_hub_download('$repo_id', '$filename', local_dir='$local_dir')
-" 2>/dev/null
-    if [ -f "$local_path" ]; then
-        ok "$filename"
-    else
-        fail "$filename download failed"
-    fi
-}
-
 # ── Helper: download from the GRAIL HF dataset repo ────────────────────────
 # Remote layout `checkpoint/<rel>` mirrors local `imports/<rel>`, so callers
 # only specify <rel> once. Hardlinks the file from the HF cache into the
@@ -195,50 +176,67 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
-# 2. GEM-SOMA checkpoints (HuggingFace nvidia/GEM-X)
+# 2. GEM-X and MoSE3 checkpoints
 # ════════════════════════════════════════════════════════════════════════════
-if [ "$SKIP_GEM_SOMA" = false ]; then
-    section "GEM-SOMA checkpoints"
-
-    GEM_SOMA_INPUTS="imports/GEM-SOMA/inputs"
-    GEM_SOMA_MARKER="$GEM_SOMA_INPUTS/pretrained/gem_soma.ckpt"
-
-    if [ -f "$GEM_SOMA_MARKER" ] && [ "$FORCE" = false ]; then
-        ok "GEM-SOMA checkpoints (already exist)"
-    else
-        python3 -c "from huggingface_hub import hf_hub_download" 2>/dev/null || {
-            fail "huggingface_hub is required. Install with: pip install huggingface_hub"
-            exit 1
-        }
-
-        HF_REPO="nvidia/GEM-X"
-
-        # Main checkpoint
-        hf_download "$HF_REPO" "gem_soma.ckpt"    "$GEM_SOMA_INPUTS/pretrained"
-
-        # ViTPose
-        hf_download "$HF_REPO" "vitpose.pth"       "$GEM_SOMA_INPUTS/checkpoints/vitpose"
-
-        # SAM-3D-Body
-        hf_download "$HF_REPO" "sam3d_body.ckpt"   "$GEM_SOMA_INPUTS/checkpoints/sam-3d-body-dinov3"
-        hf_download "$HF_REPO" "model_config.yaml" "$GEM_SOMA_INPUTS/checkpoints/sam-3d-body-dinov3"
-
-        # MHR model
-        hf_download "$HF_REPO" "mhr_model.pt"      "$GEM_SOMA_INPUTS/mhr_data"
-
-        # SOMA scale data
-        hf_download "$HF_REPO" "scale_mean.pth"    "$GEM_SOMA_INPUTS/soma_data"
-        hf_download "$HF_REPO" "scale_comps.pth"   "$GEM_SOMA_INPUTS/soma_data"
-
-        # SOMA body model assets from nvidia/soma-x
-        SOMA_REPO="nvidia/soma-x"
-        hf_download "$SOMA_REPO" "SOMA_neutral.npz"      "$GEM_SOMA_INPUTS/mhr_data"
-        hf_download "$SOMA_REPO" "MHR/SOMA_wrap_lod1.obj" "$GEM_SOMA_INPUTS/mhr_data"
-        hf_download "$SOMA_REPO" "MHR/base_body_lod6.obj" "$GEM_SOMA_INPUTS/mhr_data"
-        hf_download "$SOMA_REPO" "MHR/mhr_model_lod6.pt" "$GEM_SOMA_INPUTS/mhr_data"
-    fi
+# GEM-X's verified asset inventory lives outside the repository and is linked
+# into the pinned public submodule only after every hash and byte count matches.
+GEM_X_ASSETS="${GRAIL_GEM_X_ASSETS:-${XDG_CACHE_HOME:-$HOME/.cache}/grail/models/gem-x}"
+if [ "$SKIP_GEM_X" = false ]; then
+    section "GEM-X checkpoints"
+    python3 scripts/setup/setup_gem_x.py --assets "$GEM_X_ASSETS" \
+        --download-only --link-submodule
 else
-    section "GEM-SOMA checkpoints (skipped)"
+    section "GEM-X checkpoints (skipped)"
+fi
+
+# MoSE3 is the default dynamic-object proposal model. Preserve mismatching local
+# files rather than silently replacing a user-selected checkpoint.
+if [ "$SKIP_MOSE3" = false ]; then
+    section "MoSE3 checkpoints"
+    python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import tempfile
+from huggingface_hub import hf_hub_download
+
+revision = '5280ca2ea4c8cf41ac174645fd3aada430af7f40'
+destination = Path(os.environ.get('GRAIL_MOSE3_CHECKPOINT', 'imports/MoSE3/ckpt'))
+assets = {
+    'config.json': '7e7c60d3ddf0781195f6e5a6f500f6321cabe031b04c7334d4bf5729f10c0d4e',
+    'model.safetensors': 'fcbd51ff01c2bc2f76ca9db3037e0a4055f6bc5ea202a5e1a9f57a91107d183c',
+}
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+destination.mkdir(parents=True, exist_ok=True)
+for name, expected in assets.items():
+    target = destination / name
+    if target.exists():
+        if not target.is_file() or sha256(target) != expected:
+            raise ValueError(f'Preserving mismatched MoSE3 asset: {target}')
+        continue
+    source = Path(hf_hub_download('JoannaCCCCCC/MoSE3', name, revision=revision))
+    if sha256(source) != expected:
+        raise ValueError(f'MoSE3 download checksum mismatch: {name}')
+    with tempfile.TemporaryDirectory(prefix='.mose3-', dir=destination) as temporary:
+        staged = Path(temporary) / name
+        shutil.copyfile(source, staged)
+        try:
+            os.link(staged, target)
+        except FileExistsError:
+            if sha256(target) != expected:
+                raise ValueError(f'Preserving concurrently selected MoSE3 asset: {target}')
+print(f'MoSE3 checkpoint verified: {destination}')
+PY
+else
+    section "MoSE3 checkpoints (skipped)"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -361,52 +359,60 @@ check_file() {
 }
 
 # GEM-SMPL
-check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl/SMPL_NEUTRAL.pkl"     "SMPL neutral body model (manual)"
-check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl/J_regressor_extra.npy" "SMPL extra joint regressor"
-check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl_neutral_J_regressor.pt" "SMPL neutral joint regressor"
-check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx2smpl_sparse.pt"     "SMPL-X to SMPL sparse mapper"
-check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz" "SMPL-X body model (manual)"
-check_file "imports/GEM-SMPL/inputs/checkpoints/hmr2/epoch=10-step=25000.ckpt"        "HMR2 checkpoint"
-check_file "imports/GEM-SMPL/inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth"      "ViTPose (GEM-SMPL)"
-check_file "imports/GEM-SMPL/inputs/checkpoints/vimo/smpl_mean_params.npz"             "VIMO SMPL mean params"
-check_file "imports/GEM-SMPL/inputs/checkpoints/vimo/vimo_checkpoint.pth.tar"          "VIMO checkpoint"
-check_file "imports/GEM-SMPL/inputs/checkpoints/yolo/yolov8x.pt"                       "YOLOv8x detector"
-check_file "imports/GEM-SMPL/outputs/mocap_mixed_v1/genmo/genmo_lg_jukebox_jukebox_new/version_0/checkpoints/last.ckpt" "HMR4D (GENMO) checkpoint"
+if [ "$SKIP_GEM_SMPL" = false ]; then
+    check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl/SMPL_NEUTRAL.pkl"     "SMPL neutral body model (manual)"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl/J_regressor_extra.npy" "SMPL extra joint regressor"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smpl_neutral_J_regressor.pt" "SMPL neutral joint regressor"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx2smpl_sparse.pt"     "SMPL-X to SMPL sparse mapper"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz" "SMPL-X body model (manual)"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/hmr2/epoch=10-step=25000.ckpt"        "HMR2 checkpoint"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/vitpose/vitpose-h-multi-coco.pth"      "ViTPose (GEM-SMPL)"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/vimo/smpl_mean_params.npz"             "VIMO SMPL mean params"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/vimo/vimo_checkpoint.pth.tar"          "VIMO checkpoint"
+    check_file "imports/GEM-SMPL/inputs/checkpoints/yolo/yolov8x.pt"                       "YOLOv8x detector"
+    check_file "imports/GEM-SMPL/outputs/mocap_mixed_v1/genmo/genmo_lg_jukebox_jukebox_new/version_0/checkpoints/last.ckpt" "HMR4D (GENMO) checkpoint"
+fi
 
-# GEM-SOMA
-check_file "imports/GEM-SOMA/inputs/pretrained/gem_soma.ckpt"                          "GEM-SOMA pretrained"
-check_file "imports/GEM-SOMA/inputs/mhr_data/mhr_model.pt"                             "SOMA MHR model"
-check_file "imports/GEM-SOMA/inputs/checkpoints/vitpose/vitpose.pth"                   "ViTPose (GEM-SOMA)"
-check_file "imports/GEM-SOMA/inputs/soma_data/scale_mean.pth"                          "SOMA scale params"
-check_file "imports/GEM-SOMA/inputs/mhr_data/SOMA_neutral.npz"                         "SOMA core asset"
-check_file "imports/GEM-SOMA/inputs/mhr_data/MHR/SOMA_wrap_lod1.obj"                   "SOMA SOMA wrap"
-check_file "imports/GEM-SOMA/inputs/mhr_data/MHR/mhr_model_lod6.pt"                    "SOMA MHR model"
-check_file "imports/GEM-SOMA/inputs/mhr_data/MHR/base_body_lod6.obj"                   "SOMA base body"
+# GEM-X assets are checked by hash and byte count, not only existence.
+if [ "$SKIP_GEM_X" = false ]; then
+    python3 scripts/setup/setup_gem_x.py --assets "$GEM_X_ASSETS" --verify-only
+fi
+
+if [ "$SKIP_MOSE3" = false ]; then
+    check_file "${GRAIL_MOSE3_CHECKPOINT:-imports/MoSE3/ckpt}/config.json" "MoSE3 config"
+    check_file "${GRAIL_MOSE3_CHECKPOINT:-imports/MoSE3/ckpt}/model.safetensors" "MoSE3 model"
+fi
 
 # FoundationPose
-check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/config.yml"            "FoundationPose ScorePredictor config"
-check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/model_best.pth"         "FoundationPose ScorePredictor"
-check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/config.yml"            "FoundationPose PoseRefinePredictor config"
-check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/model_best.pth"         "FoundationPose PoseRefinePredictor"
+if [ "$SKIP_FOUNDATIONPOSE" = false ]; then
+    check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/config.yml"            "FoundationPose ScorePredictor config"
+    check_file "imports/FoundationPose/weights/2024-01-11-20-02-45/model_best.pth"         "FoundationPose ScorePredictor"
+    check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/config.yml"            "FoundationPose PoseRefinePredictor config"
+    check_file "imports/FoundationPose/weights/2023-10-28-18-33-37/model_best.pth"         "FoundationPose PoseRefinePredictor"
+fi
 
 # Hunyuan3D-2.1
-check_file "imports/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"               "RealESRGAN (Hunyuan3D)"
+if [ "$SKIP_HUNYUAN3D" = false ]; then
+    check_file "imports/Hunyuan3D-2.1/hy3dpaint/ckpt/RealESRGAN_x4plus.pth" "RealESRGAN (Hunyuan3D)"
+fi
 
 # SONIC
-check_file "imports/$SONIC_BASE_DIR/last.pt"            "SONIC base behavior-model checkpoint"
-check_file "imports/$SONIC_BASE_DIR/model_config.yaml"  "SONIC base behavior-model config"
-check_file "imports/$SONIC_PNP_TABLE_WARMSTART_DIR/last.pt"       "SONIC pnp_table warmstart checkpoint"
-check_file "imports/$SONIC_PNP_TABLE_WARMSTART_DIR/config.yaml"   "SONIC pnp_table warmstart config"
-check_file "imports/$SONIC_PNP_GROUND_WARMSTART_DIR/last.pt"      "SONIC pnp_ground warmstart checkpoint"
-check_file "imports/$SONIC_PNP_GROUND_WARMSTART_DIR/config.yaml"  "SONIC pnp_ground warmstart config"
-check_file "imports/$SONIC_STAIRS_WARMSTART_DIR/last.pt"         "SONIC terrain stairs warmstart checkpoint"
-check_file "imports/$SONIC_STAIRS_WARMSTART_DIR/config.yaml"     "SONIC terrain stairs warmstart config"
-check_file "imports/$SONIC_PNP_TABLE_RELEASE_DIR/last.pt"       "SONIC pnp_table checkpoint"
-check_file "imports/$SONIC_PNP_TABLE_RELEASE_DIR/config.yaml"   "SONIC pnp_table config"
-check_file "imports/$SONIC_PNP_GROUND_RELEASE_DIR/last.pt"      "SONIC pnp_ground checkpoint"
-check_file "imports/$SONIC_PNP_GROUND_RELEASE_DIR/config.yaml"  "SONIC pnp_ground config"
-check_file "imports/$SONIC_TERRAIN_RELEASE_DIR/last.pt"         "SONIC terrain checkpoint"
-check_file "imports/$SONIC_TERRAIN_RELEASE_DIR/config.yaml"     "SONIC terrain config"
+if [ "$SKIP_SONIC" = false ]; then
+    check_file "imports/$SONIC_BASE_DIR/last.pt"            "SONIC base behavior-model checkpoint"
+    check_file "imports/$SONIC_BASE_DIR/model_config.yaml"  "SONIC base behavior-model config"
+    check_file "imports/$SONIC_PNP_TABLE_WARMSTART_DIR/last.pt"       "SONIC pnp_table warmstart checkpoint"
+    check_file "imports/$SONIC_PNP_TABLE_WARMSTART_DIR/config.yaml"   "SONIC pnp_table warmstart config"
+    check_file "imports/$SONIC_PNP_GROUND_WARMSTART_DIR/last.pt"      "SONIC pnp_ground warmstart checkpoint"
+    check_file "imports/$SONIC_PNP_GROUND_WARMSTART_DIR/config.yaml"  "SONIC pnp_ground warmstart config"
+    check_file "imports/$SONIC_STAIRS_WARMSTART_DIR/last.pt"         "SONIC terrain stairs warmstart checkpoint"
+    check_file "imports/$SONIC_STAIRS_WARMSTART_DIR/config.yaml"     "SONIC terrain stairs warmstart config"
+    check_file "imports/$SONIC_PNP_TABLE_RELEASE_DIR/last.pt"       "SONIC pnp_table checkpoint"
+    check_file "imports/$SONIC_PNP_TABLE_RELEASE_DIR/config.yaml"   "SONIC pnp_table config"
+    check_file "imports/$SONIC_PNP_GROUND_RELEASE_DIR/last.pt"      "SONIC pnp_ground checkpoint"
+    check_file "imports/$SONIC_PNP_GROUND_RELEASE_DIR/config.yaml"  "SONIC pnp_ground config"
+    check_file "imports/$SONIC_TERRAIN_RELEASE_DIR/last.pt"         "SONIC terrain checkpoint"
+    check_file "imports/$SONIC_TERRAIN_RELEASE_DIR/config.yaml"     "SONIC terrain config"
+fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
 echo ""

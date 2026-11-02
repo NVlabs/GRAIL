@@ -1,0 +1,10 @@
+{
+  "model_type": "soma03",
+  "backend": "native",
+  "device": "cpu",
+  "soma_runtime": "gem_x",
+  "gem_x_soma_assets": "imports/GEM-X/assets/soma",
+  "soma_identity_params_path": "data/body_profiles/unitree_g1/soma/soma03_custom_smplx_identity.npz",
+  "retarget_target": "unitree_g1_dex3",
+  "robot_model_xml": "imports/GMR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml"
+}

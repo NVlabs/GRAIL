@@ -252,13 +252,16 @@ def _get_dof_axis():
     meta_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "data",
-        "g1_smplx",
+        "body_profiles",
+        "unitree_g1",
+        "smplx",
         "g1_skeleton_meta.pkl",
     )
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
             f"g1_skeleton_meta.pkl not found at {meta_path}. It is required to build "
-            "pose_aa (dof_axis). On the cluster, upload data/g1_smplx/ to the repo root."
+            "pose_aa (dof_axis). Restore data/body_profiles/unitree_g1/smplx/ "
+            "in the checkout on the exporting machine."
         )
     meta = joblib.load(meta_path)
     try:

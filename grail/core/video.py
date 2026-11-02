@@ -8,6 +8,30 @@ import numpy as np
 import requests
 from tqdm import tqdm
 
+DEFAULT_MOTION_FPS = 24.0
+
+
+def normalize_motion_fps(value, default=DEFAULT_MOTION_FPS):
+    """Return a valid motion FPS, falling back to the project default."""
+    try:
+        fps = float(value)
+    except (TypeError, ValueError):
+        fps = float(default)
+    if not np.isfinite(fps) or fps <= 0:
+        fps = float(default)
+    return fps
+
+
+def get_motion_fps(motion_data, default=DEFAULT_MOTION_FPS):
+    """Read FPS from HOI or motion data using the canonical 24-FPS fallback."""
+    if not isinstance(motion_data, dict):
+        return float(default)
+    human_data = motion_data.get("human_data", motion_data)
+    if not isinstance(human_data, dict):
+        return float(default)
+    value = human_data.get("mocap_frame_rate", human_data.get("fps", default))
+    return normalize_motion_fps(value, default=default)
+
 
 def concat_videos(input_video, result_video, topview_video, output_path):
     """
@@ -29,7 +53,7 @@ def concat_videos(input_video, result_video, topview_video, output_path):
             return False
 
     meta = readers[0].get_meta_data()
-    fps = meta.get("fps", 30.0)
+    fps = normalize_motion_fps(meta.get("fps"))
     ref_h, ref_w = readers[0].get_data(0).shape[:2]
     vertical_input = ref_h > ref_w
 
@@ -60,14 +84,14 @@ def concat_videos(input_video, result_video, topview_video, output_path):
     return os.path.exists(output_path)
 
 
-def save_images_to_video(images, output_video_path, fps=16, desc="Saving video"):
+def save_images_to_video(images, output_video_path, fps=DEFAULT_MOTION_FPS, desc="Saving video"):
     """
     Save a sequence of images to a video file
 
     Args:
         images (list or generator): Sequence of images as numpy arrays (H, W) or (H, W, C)
         output_video_path (str): Path for output video
-        fps (int): Frames per second (default: 16)
+        fps (int): Frames per second (default: 24)
         desc (str): Description for progress bar
     """
     os.makedirs(os.path.dirname(output_video_path), exist_ok=True)
@@ -117,7 +141,9 @@ def save_images_to_video(images, output_video_path, fps=16, desc="Saving video")
     print(f"Video saved: {output_video_path}")
 
 
-def compile_images_to_video(image_dir, output_video_path, fps=30, image_pattern="*.jpg"):
+def compile_images_to_video(
+    image_dir, output_video_path, fps=DEFAULT_MOTION_FPS, image_pattern="*.jpg"
+):
     """
     Compile rendered images into a video file
 
@@ -143,7 +169,7 @@ def compile_images_to_video(image_dir, output_video_path, fps=30, image_pattern=
     print(f"Video saved: {output_video_path}")
 
 
-def get_video_fps_and_frame_count(video_path):
+def get_video_fps_and_frame_count(video_path, default_fps=DEFAULT_MOTION_FPS):
     """
     Get video FPS and total frame count using OpenCV.
 
@@ -158,7 +184,7 @@ def get_video_fps_and_frame_count(video_path):
     if not cap.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = normalize_motion_fps(cap.get(cv2.CAP_PROP_FPS), default=default_fps)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     cap.release()
@@ -187,7 +213,7 @@ def resize_video(input_path, target_width, target_height, output_path=None):
     meta = reader.get_meta_data()
     first = reader.get_data(0)
     cur_h, cur_w = first.shape[:2]
-    fps = meta.get("fps", 30)
+    fps = normalize_motion_fps(meta.get("fps"))
 
     if cur_w == target_width and cur_h == target_height:
         reader.close()
@@ -445,7 +471,7 @@ def concatenate_videos(video_paths, output_path):
     from PIL import Image as _PILImage
 
     first_reader = imageio.get_reader(video_paths[0], format="ffmpeg")
-    fps = first_reader.get_meta_data().get("fps", 30)
+    fps = normalize_motion_fps(first_reader.get_meta_data().get("fps"))
     first_frame = first_reader.get_data(0)
     height, width = first_frame.shape[:2]
     first_reader.close()

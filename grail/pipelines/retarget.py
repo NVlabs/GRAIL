@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_META_PKL = _REPO_ROOT / "data" / "g1_smplx" / "g1_skeleton_meta.pkl"
+_META_PKL = _REPO_ROOT / "data/body_profiles/unitree_g1/smplx/g1_skeleton_meta.pkl"
 
 
 def _run(label: str, cmd: list[str]) -> None:

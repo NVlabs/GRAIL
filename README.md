@@ -65,11 +65,13 @@
 
 | Image | Use it for |
 | --- | --- |
-| `docker.io/nvgrail/grail:1.1.1` (`:latest`) | Standard GRAIL with Kling; no MiniMax-H3/SGLang runtime |
-| `docker.io/nvgrail/grail:1.1.1-minimax-h3` (`:minimax-h3`) | Standard GRAIL plus an isolated MiniMax-H3/SGLang runtime |
+| `docker.io/nvgrail/grail:1.2.0` (`:latest`) | Standard GRAIL with native SOMA 0.3 and Kling; no MiniMax-H3/SGLang runtime |
+| `docker.io/nvgrail/grail:1.2.0-minimax-h3` (`:minimax-h3`) | Standard GRAIL plus an isolated MiniMax-H3/SGLang runtime |
 
 Both Linux AMD64 images contain runtime environments only. They do not contain
 the GRAIL/Sana source, GRAIL or MiniMax-H3 checkpoints, API keys, or user data.
+The repo setup installs the isolated GEM-X, MoGe-3, MoSE3, and Python 3.12 SOMA
+Retargeter runtimes and validates native SOMA 0.3 support in the GRAIL env.
 Keep credentials outside the image and provide them only at runtime.
 
 ```bash
@@ -78,7 +80,7 @@ cd GRAIL
 git submodule update --init --recursive
 
 # The public Docker Hub images can be pulled without registry credentials.
-export GRAIL_IMAGE=docker.io/nvgrail/grail:1.1.1
+export GRAIL_IMAGE=docker.io/nvgrail/grail:1.2.0
 docker pull "$GRAIL_IMAGE"
 
 docker run --gpus all -it --shm-size=16g \
@@ -88,9 +90,9 @@ docker run --gpus all -it --shm-size=16g \
 # inside the container
 cd /workspace/grail
 bash scripts/setup/install_env_docker.sh   # validates native extensions, downloads Blender
-bash scripts/setup/download_checkpoints.sh # GEM-SMPL / GEM-SOMA / FoundationPose weights
+bash scripts/setup/download_checkpoints.sh # GEM-X / MoSE3 / FoundationPose and legacy weights
 bash scripts/setup/download_comasset.sh --category cordless_drill # quick-start object
-source /root/miniconda3/etc/profile.d/conda.sh
+eval "$(conda shell.bash hook)"
 conda activate grail
 [ -f .env ] && source .env                  # OPENAI_API_KEY, KLING_*, HF_TOKEN
 ```
@@ -108,12 +110,18 @@ python -m grail.pipelines.gen_terrain --type stairs --num 50 --output_dir data/s
 conda run -n hunyuan python -m grail.pipelines.gen_3d_assets \
     -i configs/gen_3d/example_objects.yaml -o data/gen_example
 
-# 2D HOI generation (Blender + Kling video)
+# 2D HOI generation (bundled G1 DHGen character + Kling video)
 python -m grail.pipelines.gen_2dhoi --dataset ComAsset --category cordless_drill \
-    --character kid --results_dir results --video_model_api kling-ai
+    --results_dir results --video_model_api kling-ai
 
-# 4D HOI reconstruction
+# 4D HOI reconstruction (default: native SOMA + hybrid object tracking)
 python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill --results_dir results
+
+# Native SOMA -> Unitree G1 + DEx3 (the output directory must not already exist)
+HOI_DATA=$(find results/generation/4dhoi_recon_soma03_valid/ComAsset/cordless_drill \
+    -type f -path '*/hoi_data/hoi_data.pkl' -print -quit)
+python -m grail.retargeting.soma "$HOI_DATA" results/retargeted/cordless_drill_g1_dex3 \
+    --model-config configs/retargeting/soma_g1.json
 ```
 
 Full install, dataset, and config notes: see [Documentation](#documentation) below.

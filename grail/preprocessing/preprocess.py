@@ -22,6 +22,12 @@ from tqdm import tqdm
 # Add project root to path
 from grail.adapters.depth import est_depth
 from grail.adapters.sam import get_bbox_from_mask, track_masks, track_masks_from_bbox
+from grail.core.depth_config import (
+    depth_input_bindings,
+    preserve_depth_cache,
+    read_depth_cache_metadata,
+    write_depth_cache_metadata,
+)
 from grail.core.video import extract_frames_from_video, save_images_to_video
 
 
@@ -112,9 +118,11 @@ def preprocess_depth(
     first_frame_human_mask=None,
     intrinsics=None,
     device="cuda",
+    source_video_path=None,
+    input_paths=None,
 ):
     """
-    Estimate per-frame metric depth with MoGe, optionally aligning to
+    Estimate per-frame metric depth with MoGe-3, optionally aligning to
     ground-truth depth from Blender rendering.
 
     Args:
@@ -126,11 +134,16 @@ def preprocess_depth(
         first_frame_human_mask: First frame human mask from Blender (numpy array)
         intrinsics: Camera intrinsics (3, 3) numpy array or path to cam_K.txt (optional)
         device: Device to run inference on
+        source_video_path: Original video path recorded in cache provenance (optional)
+        input_paths: Selected source/calibration paths to bind for safe cache reuse (optional)
 
     Returns:
         list: List of depth tensors for each frame
     """
-    print(f"Estimating depth for {len(image_list)} frames using MoGe...")
+    if not image_list:
+        raise ValueError("Cannot estimate depth for an empty frame list")
+    inputs = depth_input_bindings(input_paths) if input_paths is not None else None
+    print(f"Estimating depth for {len(image_list)} frames using MoGe-3...")
 
     # Load ground truth depth for first frame if available
     gt_depth_first_frame = None
@@ -142,28 +155,72 @@ def preprocess_depth(
             print(f"Loaded GT depth for first frame from: {gt_depth_path}")
 
     # Estimate depth (MoGe, per-frame, metric)
-    depth_list = est_depth(
+    depth_list, inference_metadata = est_depth(
         image_list,
         device=device,
         intrinsics=intrinsics,
         gt_depth_first_frame=gt_depth_first_frame,
+        return_metadata=True,
     )
 
-    # Align depth with ground truth (per-frame)
-    if gt_depth_path is not None and os.path.exists(gt_depth_path):
+    # Align depth with ground truth (per-frame), preserving the existing method.
+    alignment = {
+        "status": "not_requested" if gt_depth_path is None else "gt_unavailable",
+        "method": "per_frame_background_linear_depth_scale_shift",
+        "gt_depth_path": os.fspath(gt_depth_path) if gt_depth_path is not None else None,
+        "frames": [],
+    }
+    if gt_depth_first_frame is not None:
         print(f"Aligning depth with ground truth (per-frame): {gt_depth_path}")
-        depth_list = align_depth_with_gt(
+        depth_list, alignment = align_depth_with_gt(
             depth_list,
             gt_depth_path,
             video_masks=video_masks,
             first_frame_obj_mask=first_frame_obj_mask,
             first_frame_human_mask=first_frame_human_mask,
             device=device,
+            return_metadata=True,
         )
 
-    # Save depth to cache
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-    torch.save(depth_list, cache_file)
+    if len(depth_list) != len(image_list):
+        raise ValueError("Depth inference returned a different frame count than the source")
+    if isinstance(intrinsics, (str, os.PathLike)):
+        camera_matrix = np.loadtxt(intrinsics).reshape(3, 3).tolist()
+        intrinsics_path = os.fspath(intrinsics)
+    elif intrinsics is not None:
+        camera_matrix = np.asarray(intrinsics).reshape(3, 3).tolist()
+        intrinsics_path = None
+    else:
+        camera_matrix = None
+        intrinsics_path = None
+
+    # Publish the sidecar last: a crash cannot leave an apparently current cache.
+    os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
+    if inputs is not None and depth_input_bindings(input_paths) != inputs:
+        raise ValueError("Depth source/calibration inputs changed during inference")
+    temporary_cache = f"{cache_file}.{os.getpid()}.tmp"
+    try:
+        torch.save(depth_list, temporary_cache)
+        archive = preserve_depth_cache(cache_file)
+        if archive is not None:
+            print(f"  Preserved previous depth cache: {archive}")
+        os.replace(temporary_cache, cache_file)
+    finally:
+        if os.path.exists(temporary_cache):
+            os.remove(temporary_cache)
+    write_depth_cache_metadata(
+        cache_file,
+        {
+            "frame_count": len(image_list),
+            "input_bindings": inputs,
+            "source_video_path": os.fspath(source_video_path) if source_video_path else None,
+            "source_frames": [os.fspath(path) for path in image_list],
+            "intrinsics": camera_matrix,
+            "intrinsics_path": intrinsics_path,
+            "gt_calibration": alignment,
+            "inference": inference_metadata,
+        },
+    )
     print(f"Saved depth to cache: {cache_file}")
 
     return depth_list
@@ -176,6 +233,7 @@ def align_depth_with_gt(
     first_frame_obj_mask=None,
     first_frame_human_mask=None,
     device="cuda",
+    return_metadata=False,
 ):
     """
     Align estimated depth with ground truth depth using scale and shift alignment.
@@ -195,15 +253,25 @@ def align_depth_with_gt(
         first_frame_obj_mask: First frame object mask from Blender (numpy array, binary)
         first_frame_human_mask: First frame human mask from Blender (numpy array, binary)
         device: Device for computation
+        return_metadata: Also return per-frame calibration provenance when True
 
     Returns:
-        list: Aligned depth tensors
+        list: Aligned depth tensors, or (list, metadata) if return_metadata=True
     """
+    metadata = {
+        "status": "gt_unavailable",
+        "method": "per_frame_background_linear_depth_scale_shift",
+        "gt_depth_path": os.fspath(gt_depth_path),
+        "first_frame_obj_mask_supplied": first_frame_obj_mask is not None,
+        "first_frame_human_mask_supplied": first_frame_human_mask is not None,
+        "video_masks_supplied": video_masks is not None,
+        "frames": [],
+    }
     # Load ground truth depth (16-bit PNG, millimeter scale)
     gt_depth_mm = cv2.imread(gt_depth_path, cv2.IMREAD_UNCHANGED)
     if gt_depth_mm is None:
         print(f"Warning: Could not read ground truth depth from {gt_depth_path}")
-        return depth_list
+        return (depth_list, metadata) if return_metadata else depth_list
 
     # Convert to meters
     gt_depth = gt_depth_mm.astype(np.float32) / 1000.0
@@ -276,7 +344,8 @@ def align_depth_with_gt(
 
         # Create valid mask for background only
         # Background = NOT foreground, valid depth values
-        valid_mask = (gt_depth > 0.1) & (gt_depth < 65.0) & (est_depth > 0.1)
+        prediction_valid = torch.isfinite(est_depth) & (est_depth > 0)
+        valid_mask = (gt_depth > 0.1) & (gt_depth < 65.0) & (est_depth > 0.1) & prediction_valid
 
         if combined_foreground_mask is not None:
             background_mask = ~combined_foreground_mask
@@ -287,7 +356,17 @@ def align_depth_with_gt(
             print(
                 f"Warning: Frame {frame_idx} - not enough valid background pixels, skipping alignment"
             )
-            aligned_depth_list.append(est_depth)
+            aligned_depth_list.append(torch.where(prediction_valid, est_depth, 0.0))
+            metadata["frames"].append(
+                {
+                    "frame_idx": frame_idx,
+                    "status": "insufficient_valid_background",
+                    "valid_pixels": int(valid_mask.sum().item()),
+                    "scale": 1.0,
+                    "shift": 0.0,
+                    "foreground_excluded": combined_foreground_mask is not None,
+                }
+            )
             continue
 
         # Compute scale and shift using least squares on background only
@@ -307,7 +386,19 @@ def align_depth_with_gt(
         # Apply alignment
         aligned_depth = scale * est_depth + shift
         aligned_depth = torch.clamp(aligned_depth, min=0.0)  # Ensure non-negative
+        # An affine shift must not invent geometry at model-invalid pixels.
+        aligned_depth = torch.where(prediction_valid, aligned_depth, 0.0)
         aligned_depth_list.append(aligned_depth)
+        metadata["frames"].append(
+            {
+                "frame_idx": frame_idx,
+                "status": "aligned",
+                "valid_pixels": int(valid_mask.sum().item()),
+                "scale": scale,
+                "shift": shift,
+                "foreground_excluded": combined_foreground_mask is not None,
+            }
+        )
 
         # Print stats for first and last frame
         if frame_idx == 0 or frame_idx == len(depth_list) - 1:
@@ -315,7 +406,11 @@ def align_depth_with_gt(
                 f"Frame {frame_idx}: scale={scale:.4f}, shift={shift:.4f}, bg_pixels={valid_mask.sum().item()}"
             )
 
-    return aligned_depth_list
+    aligned_count = sum(frame["status"] == "aligned" for frame in metadata["frames"])
+    metadata["status"] = (
+        "aligned" if aligned_count == len(depth_list) else "partial" if aligned_count else "skipped"
+    )
+    return (aligned_depth_list, metadata) if return_metadata else aligned_depth_list
 
 
 def load_masks_from_cache(cache_file):
@@ -336,13 +431,15 @@ def load_masks_from_cache(cache_file):
     return masks
 
 
-def load_depth_from_cache(cache_file, device="cuda"):
+def load_depth_from_cache(cache_file, device="cuda", *, metadata_binding=None):
     """
     Load depth from cache file.
 
     Args:
         cache_file: Path to the depth cache (.pt)
         device: Device to load tensors to
+        metadata_binding: Optional inventory-bound {path, sha256, bytes} for
+            relocated provenance; defaults to the adjacent .json sidecar.
 
     Returns:
         list: List of depth tensors
@@ -350,7 +447,10 @@ def load_depth_from_cache(cache_file, device="cuda"):
     if not os.path.exists(cache_file):
         raise FileNotFoundError(f"Depth cache not found: {cache_file}")
 
+    metadata = read_depth_cache_metadata(cache_file, metadata_binding=metadata_binding)
     depth_list = torch.load(cache_file, map_location=device, weights_only=True)
+    if len(depth_list) != metadata["frame_count"]:
+        raise ValueError(f"Depth cache frame count does not match provenance: {cache_file}")
     print(f"Loaded depth from cache: {cache_file}")
     return depth_list
 

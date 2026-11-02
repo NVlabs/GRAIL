@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "profile_id": "unitree_g1",
+  "variant_id": "dhgen_00008",
+  "kind": "alternative_dressed_character",
+  "format": "DHGen USD",
+  "usd": "c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd",
+  "metadata": [
+    "c416aab4-cf3f-11f1-bd53-1929f989c6a9.json",
+    "c416aab4-cf3f-11f1-bd53-1929f989c6a9_post.json"
+  ],
+  "preview": "turntable_video.mp4",
+  "authored_age_years": 11,
+  "source": {
+    "collection": "dressed_character_for_robot",
+    "relative_usd": "unitree_g1/00008/c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd",
+    "asset_uuid": "c416aab4-cf3f-11f1-bd53-1929f989c6a9",
+    "usd_sha256": "4b2a7fa94fc2807e31f7e0e63324c4c94aecaccdebf0083599b4951601ca15f6",
+    "files_modified": false
+  },
+  "import": {
+    "up_axis": "Y",
+    "meters_per_unit": 0.01,
+    "character_scale": [
+      0.01,
+      0.01,
+      0.01
+    ],
+    "character_output_id": "unitree_g1_dhgen_00008"
+  },
+  "identity": {
+    "profile_association": "intended_robot_only",
+    "exact_paired_soma_identity_sha256": null,
+    "changes_existing_profile_defaults": false
+  },
+  "selection_reason": "Prefer 00008: compact bun, clear face, plain fitted short-sleeve T-shirt, bare forearms/hands, slim trousers and simple flats. Less silhouette ambiguity than loose sweaters and long hair; authored child metadata.",
+  "validation": {
+    "batch_id": "dressed_5robots_25cases_ord_20261025_v001",
+    "requested_pipeline_completed_cases": 5,
+    "motion_quality": "PARTIAL",
+    "accepted_motion_cases": 0,
+    "full_replay_reviewed": false
+  },
+  "source_file_count": 41,
+  "source_total_bytes": 58588351,
+  "files": [
+    {
+      "path": "c416aab4-cf3f-11f1-bd53-1929f989c6a9.json",
+      "bytes": 42479,
+      "sha256": "52053f6869f231470645e9f2773b297d8a8b4694378fd79688fae72d3f846fef"
+    },
+    {
+      "path": "c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd",
+      "bytes": 6072060,
+      "sha256": "4b2a7fa94fc2807e31f7e0e63324c4c94aecaccdebf0083599b4951601ca15f6"
+    },
+    {
+      "path": "c416aab4-cf3f-11f1-bd53-1929f989c6a9_post.json",
+      "bytes": 42479,
+      "sha256": "52053f6869f231470645e9f2773b297d8a8b4694378fd79688fae72d3f846fef"
+    },
+    {
+      "path": "texture/eyes/eyechoroid_green/coat_normal.jpg",
+      "bytes": 430727,
+      "sha256": "dc4a32edf331e33697652a35dcb66c299c9c5d923369a42ff698ba3bf78bb2d0"
+    },
+    {
+      "path": "texture/eyes/eyechoroid_green/diffuse_reflection_color.jpg",
+      "bytes": 508771,
+      "sha256": "65b0e23c176f43ee2d623107b18235df2a7c101d3ed897545a8848d9cb8c0c3b"
+    },
+    {
+      "path": "texture/footwear/textile_leather_aniline/diffuse_reflection_color.jpg",
+      "bytes": 1361660,
+      "sha256": "3d5e690e31d829c02f88bcd2ebdfcbb646b695f69bcf0e0aaea8008d9289cbba"
+    },
+    {
+      "path": "texture/footwear/textile_leather_aniline/geometry_normal.jpg",
+      "bytes": 1472138,
+      "sha256": "dab3e8a3017d7cd411981b9f9ae45e78a890b8438c02a429ac05926f342d3b0f"
+    },
+    {
+      "path": "texture/footwear/textile_leather_aniline/specular_reflection_roughness.jpg",
+      "bytes": 1380755,
+      "sha256": "ea1097e83f818a08b1322a1f583303cfc01f0cd3d5412577a15620082c681592"
+    },
+    {
+      "path": "texture/footwear/textile_leather_aniline/specular_reflection_weight.jpg",
+      "bytes": 1380660,
+      "sha256": "02f825a36e682c573edd3489a05b4ac22468e1f874d622df1a8e6e26bc17fe4d"
+    },
+    {
+      "path": "texture/hair/haircap/diffuse_reflection_color.jpg",
+      "bytes": 1004033,
+      "sha256": "a3d07ade2848a6d77215fc2dc269834cb51b753eacebd9b07d3fed3939e18869"
+    },
+    {
+      "path": "texture/hair/haircap/geometry_normal.jpg",
+      "bytes": 1046089,
+      "sha256": "a20b5d5935d182751ec9e2f00d2e3abb70bcb5365604d0ee3dd180f77696d137"
+    },
+    {
+      "path": "texture/hair/haircap/geometry_opacity.jpg",
+      "bytes": 1262846,
+      "sha256": "c94d570dc95da9802a23343abeb6191d7737b77ad948bc8b832a5d6f83c6eac5"
+    },
+    {
+      "path": "texture/hair/haircap/specular_reflection_anisotropy_rotation.jpg",
+      "bytes": 73098,
+      "sha256": "27555df6829f2c31d7de1ac181afe19f6565db68acf7730ac6096b682fd684b5"
+    },
+    {
+      "path": "texture/hair/haircap/specular_reflection_color.jpg",
+      "bytes": 329772,
+      "sha256": "eed8a7a80010e24f9ba987e2e695abb4480b1130a0b63e5d15505780cd502c2e"
+    },
+    {
+      "path": "texture/hair/haircap/specular_reflection_weight.jpg",
+      "bytes": 211673,
+      "sha256": "ffb53ed962665d6e768136e874daa60cc2c998e883f17f45895a86719bdbe6aa"
+    },
+    {
+      "path": "texture/hair/haircard/diffuse_reflection_color.jpg",
+      "bytes": 1082848,
+      "sha256": "32492e4bce2e7491963cd9e6ad4e6391e9b898d18507978c413f2b92e0fce6f2"
+    },
+    {
+      "path": "texture/hair/haircard/geometry_normal.jpg",
+      "bytes": 1136692,
+      "sha256": "e3fc11922779cedbb1eac841a0d061c4823387f525626ba1e1af30b856afa0c6"
+    },
+    {
+      "path": "texture/hair/haircard/geometry_opacity.jpg",
+      "bytes": 1207904,
+      "sha256": "92adf22b62b0e9411340e8427de4211b9ab997a5b7101729dd0182c255ab2d08"
+    },
+    {
+      "path": "texture/hair/haircard/specular_reflection_anisotropy_rotation.jpg",
+      "bytes": 901390,
+      "sha256": "42e9924aa375db650e4dd05e70a485016c164b4a174eccbf95676674f5b46422"
+    },
+    {
+      "path": "texture/hair/haircard/specular_reflection_color.jpg",
+      "bytes": 546838,
+      "sha256": "39c41e2c6094f33aed3ea6a8f9bc13f449b562ba3aa49434fcd7cb45b3b749c3"
+    },
+    {
+      "path": "texture/hair/haircard/specular_reflection_weight.jpg",
+      "bytes": 530646,
+      "sha256": "f7165b7732eb882bd376dc0d8e614bd13ef708cf8dfb75e6216e1f0765415c12"
+    },
+    {
+      "path": "texture/pants/textile_polyester_twill/diffuse_reflection_color.jpg",
+      "bytes": 712497,
+      "sha256": "ee1877994aa7fa0d591f633ebf298aa115486826c134a9502dd8e35c8c5f76b9"
+    },
+    {
+      "path": "texture/pants/textile_polyester_twill/geometry_normal.jpg",
+      "bytes": 710111,
+      "sha256": "a9e2860d8e35fc7d41e108d28e6604ab22f9dfc0dfc2d1c89856831075388094"
+    },
+    {
+      "path": "texture/pants/textile_polyester_twill/specular_reflection_anisotropy_rotation.jpg",
+      "bytes": 1037158,
+      "sha256": "95c1895cbb92bc4ebb4e78e75f453967441c486580b4ee3c7c4862fda69d5b21"
+    },
+    {
+      "path": "texture/pants/textile_polyester_twill/specular_reflection_roughness.jpg",
+      "bytes": 377462,
+      "sha256": "32bb5f39a933fd35ddd60aca498411be0672bf6892cecd008097f6c30bf992db"
+    },
+    {
+      "path": "texture/pants/textile_polyester_twill/specular_reflection_weight.jpg",
+      "bytes": 377477,
+      "sha256": "de0861c22032d62f6a7b3f55e7b2f721d98b2e7adeb54071423a6b7094c99ab7"
+    },
+    {
+      "path": "texture/shirt/textile_cotton_jersey/diffuse_reflection_color.jpg",
+      "bytes": 1208509,
+      "sha256": "644a8c05f66664b7546810ddeeb3b23e4967b6e915a8c3d39ad423fe55be147e"
+    },
+    {
+      "path": "texture/shirt/textile_cotton_jersey/geometry_normal.jpg",
+      "bytes": 1475644,
+      "sha256": "0d01a8b2287a17b00cf538f7be348eb8f00b47cd6bbf42c3a12614e99de2f44f"
+    },
+    {
+      "path": "texture/shirt/textile_cotton_jersey/specular_reflection_anisotropy_rotation.jpg",
+      "bytes": 683726,
+      "sha256": "928da85f7ce2a00a4809506ed02cdc2e26a2f8fabfecf8e88cf337de36f125d8"
+    },
+    {
+      "path": "texture/shirt/textile_cotton_jersey/specular_reflection_roughness.jpg",
+      "bytes": 250591,
+      "sha256": "c9b54207c7b9f6c03788b1e540724fb9cc3d0c20036db13648184957d90dce8b"
+    },
+    {
+      "path": "texture/shirt/textile_cotton_jersey/specular_reflection_weight.jpg",
+      "bytes": 250526,
+      "sha256": "af1d9c58de6c0d4b3d1bc8fc8be8fee1d2bcff9a8437acafbe3b16f8aa039b87"
+    },
+    {
+      "path": "texture/skin/skin/diffuse_reflection_color_1001.jpg",
+      "bytes": 1587412,
+      "sha256": "b2a21cc437cd7b9bae6514c834938caafb156ebe3185db386a7172ee6b895cf0"
+    },
+    {
+      "path": "texture/skin/skin/diffuse_reflection_color_1002.jpg",
+      "bytes": 1457210,
+      "sha256": "d16a7074635277f1e80fff15c6d3712d142afa7e46a8a563acce323ce6688f97"
+    },
+    {
+      "path": "texture/skin/skin/diffuse_reflection_color_1003.jpg",
+      "bytes": 1605388,
+      "sha256": "782ce3410c765bec0490bcf5324d634a5e2bb35807572080256775c6b81d2e29"
+    },
+    {
+      "path": "texture/skin/skin/geometry_normal_1001.jpg",
+      "bytes": 5414215,
+      "sha256": "22ab16670cfe8c57d752698560e50e3807a43277c36f39e11f19cd2123481e86"
+    },
+    {
+      "path": "texture/skin/skin/geometry_normal_1002.jpg",
+      "bytes": 5295596,
+      "sha256": "0f5bcff500d0c3939bc049bca023ab36f478f87b402c6d34f9e6cccd5bc4bd70"
+    },
+    {
+      "path": "texture/skin/skin/geometry_normal_1003.jpg",
+      "bytes": 5357911,
+      "sha256": "30aaec757443a09441b080eea190957dd5d634a48e8021496a1db864f68e7c6c"
+    },
+    {
+      "path": "texture/skin/skin/specular_reflection_roughness_1001.jpg",
+      "bytes": 2485096,
+      "sha256": "3c80e5b69ab7018eca3635a024c7b11327f55e6bb2ae919b088e3df599c8fa6c"
+    },
+    {
+      "path": "texture/skin/skin/specular_reflection_roughness_1002.jpg",
+      "bytes": 2272703,
+      "sha256": "6e7c77281abb9c186cf7b337d462273840077e00d6f0b07560db25b98dd03f7c"
+    },
+    {
+      "path": "texture/skin/skin/specular_reflection_roughness_1003.jpg",
+      "bytes": 2514618,
+      "sha256": "d408936a11c40410c576d4fe3a04714db28504b93fbe3dbae221a33bb0be6d96"
+    },
+    {
+      "path": "turntable_video.mp4",
+      "bytes": 1488943,
+      "sha256": "b613985382d56598467e6175c430f428077d111ddb9d6ceefa0d960a52387dc8"
+    }
+  ]
+}

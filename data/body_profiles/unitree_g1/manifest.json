@@ -1,0 +1,28 @@
+{
+  "schema": "grail.body-profile.v1",
+  "robot": "unitree_g1",
+  "scope": "Public G1 embodiment with a DHGen rendering character and native SOMA03 reconstruction identity.",
+  "default_character": {
+    "variant": "dhgen_00008",
+    "manifest": "characters/dhgen_00008/manifest.json",
+    "usd": "characters/dhgen_00008/c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd",
+    "import_scale": [0.01, 0.01, 0.01],
+    "role": "2d_hoi_rendering_only"
+  },
+  "soma": {
+    "selected_identity": "soma/soma03_custom_smplx_identity.npz",
+    "manifest": "soma/soma03_custom_smplx_identity.json",
+    "native_schema": "grail.soma03.identity128.fixed_identity_scale.local56.v2",
+    "fixed_global_scale": 0.7735832333564758,
+    "runtime_external_scale": 1.0
+  },
+  "smplx": {
+    "template": "smplx/g1_smplx_tpose.obj",
+    "parameters": "smplx/g1_smplx_param.npz",
+    "skeleton_metadata": "smplx/g1_skeleton_meta.pkl",
+    "gmr_mapping": "smplx/gmr_smplx_to_g1.json",
+    "runtime_external_scale": 1.0
+  },
+  "contact_policy": "legacy_reconstruction_contact_labels",
+  "motion_contact_acceptance": "unreviewed"
+}

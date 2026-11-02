@@ -1,7 +1,7 @@
 """Blender asset loading: objects, characters, textures.
 
-Functions for loading 3D objects (OBJ/GLB), RenderPeople characters,
-G1 robots, static scene objects, and managing textures.
+Functions for loading 3D objects (OBJ/GLB), rigged characters, G1 robots,
+static scene objects, and managing textures.
 """
 
 import glob
@@ -52,6 +52,11 @@ def repose_renderpeople(parent_obj, rand_seed=None):
         parent_obj: The parent object containing the RenderPeople character
         rand_seed: The seed to randomize the pose
     """
+    if parent_obj.get("character_rig") == "dhgen":
+        from grail.pipelines.blender.dhgen import repose
+
+        repose(parent_obj)
+        return
     print("Applying relaxed pose to character...")
 
     # Find the armature among the children
@@ -72,13 +77,21 @@ def repose_renderpeople(parent_obj, rand_seed=None):
     # Get the pose bones
     pose_bones = armature.pose.bones
 
+    # List available bones for debugging
+    # print(f"Available bones in armature:")
+    # for bone in pose_bones:
+    #     print(f"  - {bone.name}")
+
+    # if rand_seed:
+    #     random.seed(rand_seed)
+
     arm_bones = {
-        "LeftShoulder": [0, 5, 0],
-        "RightShoulder": [0, 5, 0],
-        "LeftArm": [0, -22, 0],
-        "RightArm": [0, -22, 0],
-        "LeftForeArm": [-20, -25, 0],
-        "RightForeArm": [-20, -25, 0],
+        "LeftShoulder": [0, -10, 0],
+        "RightShoulder": [0, -10, 0],
+        "LeftArm": [0, -65, 0],
+        "RightArm": [0, -65, 0],
+        "LeftForeArm": [45, -15, 0],
+        "RightForeArm": [45, -15, 0],
     }
     for bone_name, angle_deg in arm_bones.items():
         bone = pose_bones[bone_name]
@@ -196,25 +209,28 @@ def load_renderpeople_from_name(
     rotation=(0, 0, 0),
     scale=(1, 1, 1),
     rand_seed=None,
-    character_dir="data/RenderPeople",
-    texture_dir="data/RenderPeople/diffuseTextures",
+    character_dir="data/body_profiles/unitree_g1/characters",
+    texture_dir="data/body_profiles/unitree_g1/characters",
+    usd_file_path=None,
 ):
     """
-    Convenience function to load a character by name.
+    Convenience function to load a RenderPeople character by name
 
     Args:
-        character_name (str): Name of the character (e.g., "kid", "aaron", "alexandra")
+        character_name (str): Name of the character (e.g., "aaron", "alexandra", "emma")
         position (tuple): (x, y, z) position in world coordinates
         rotation (tuple): (x, y, z) rotation in radians
         scale (tuple): (x, y, z) scale factors
         character_dir (str): Root directory containing RenderPeople USD folders
         texture_dir (str): Directory containing diffuse texture files
+        usd_file_path (str, optional): Exact USD asset, bypassing name lookup
 
     Returns:
         object: The imported Blender object(s)
     """
     parent_obj = load_renderpeople_asset(
         character_name=character_name,
+        usd_file_path=usd_file_path,
         position=position,
         rotation=rotation,
         scale=scale,
@@ -964,64 +980,88 @@ def load_glb_asset(glb_file_path, position=(0, 0, 0), rotation=(0, 0, 0), scale=
     return transform_obj
 
 
+def resolve_renderpeople_usd(
+    character_name=None,
+    usd_file_path=None,
+    character_dir="data/body_profiles/unitree_g1/characters",
+):
+    """Resolve an exact asset or a legacy name without importing it into Blender.
+
+    The public default is the bundled G1 DHGen character. Historical name lookup
+    remains available when a caller explicitly selects a legacy asset directory.
+    """
+    if usd_file_path is not None:
+        return os.fspath(usd_file_path)
+    if character_name is None:
+        raise ValueError("Either character_name or usd_file_path must be provided")
+
+    repo = Path(__file__).resolve().parents[3]
+    bundled = repo / "data/body_profiles/unitree_g1/characters"
+    if (
+        character_name.lower()
+        in {
+            "unitree_g1",
+            "jason_g1_rigged_001",
+            "unitree_g1_dhgen_00008",
+            "dhgen_00008",
+        }
+        and Path(character_dir).resolve() == bundled.resolve()
+    ):
+        return str(bundled / "dhgen_00008" / "c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd")
+
+    matching_dirs = [
+        name for name in os.listdir(character_dir) if character_name.lower() in name.lower()
+    ]
+    if not matching_dirs:
+        raise FileNotFoundError(f"No character found matching '{character_name}'")
+    selected_dir = matching_dirs[0]
+    if len(matching_dirs) > 1:
+        print(f"Multiple matches found for '{character_name}', using: {selected_dir}")
+    usd_files = sorted(Path(character_dir, selected_dir).glob("*.usd"))
+    if len(usd_files) != 1:
+        raise FileNotFoundError(
+            f"Expected exactly one USD under {Path(character_dir, selected_dir)}, "
+            f"found {len(usd_files)}"
+        )
+    return str(usd_files[0])
+
+
 def load_renderpeople_asset(
     character_name=None,
     usd_file_path=None,
     position=(0, 0, 0),
     rotation=(0, 0, 0),
     scale=(1, 1, 1),
-    character_dir="data/RenderPeople",
-    texture_dir="data/RenderPeople/diffuseTextures",
+    character_dir="data/body_profiles/unitree_g1/characters",
+    texture_dir="data/body_profiles/unitree_g1/characters",
 ):
     """
-    Load a character USD file and place it in the scene with specified transform.
+    Load a RenderPeople USD file and place it in the scene with specified transform
 
     Args:
-        character_name (str, optional): Name of the character (e.g., "kid", "aaron").
-                                       Will look for the first matching directory.
+        character_name (str, optional): RenderPeople name, or unitree_g1 /
+                                       jason_g1_rigged_001 for the packaged G1 human
         usd_file_path (str, optional): Direct path to the .usd file
                                       Either character_name or usd_file_path must be provided
         position (tuple): (x, y, z) position in world coordinates
         rotation (tuple): (x, y, z) rotation in radians
         scale (tuple): (x, y, z) scale factors
-        character_dir (str): Root directory containing character USD folders
+        character_dir (str): Root directory containing RenderPeople USD folders
         texture_dir (str): Directory containing diffuse texture files
 
     Returns:
         object: The imported Blender object(s)
     """
 
-    # Determine the USD file path
-    if usd_file_path is None:
-        if character_name is None:
-            raise ValueError("Either character_name or usd_file_path must be provided")
-
-        matching_dirs = []
-
-        character_query = character_name.lower()
-        for dir_name in sorted(os.listdir(character_dir)):
-            dir_path = os.path.join(character_dir, dir_name)
-            if not os.path.isdir(dir_path):
-                continue
-            usd_candidate = os.path.join(dir_path, f"{dir_name}.usd")
-            if character_query in dir_name.lower() and os.path.exists(usd_candidate):
-                matching_dirs.append(dir_name)
-
-        if not matching_dirs:
-            raise FileNotFoundError(f"No character found matching '{character_name}'")
-
-        # Use the first matching directory
-        selected_dir = matching_dirs[0]
-        if len(matching_dirs) > 1:
-            print(f"Multiple matches found for '{character_name}', using: {selected_dir}")
-
-        # Construct the USD file path
-        usd_file_path = os.path.join(character_dir, selected_dir, f"{selected_dir}.usd")
+    usd_file_path = resolve_renderpeople_usd(character_name, usd_file_path, character_dir)
 
     if not os.path.exists(usd_file_path):
         raise FileNotFoundError(f"USD file not found: {usd_file_path}")
 
-    print(f"Loading RenderPeople USD asset: {usd_file_path}")
+    print(f"Loading character USD asset: {usd_file_path}")
+    from grail.pipelines.blender.dhgen import open_dhgen_stage, prepare_import
+
+    dhgen_stage = open_dhgen_stage(usd_file_path)
 
     # Clear selection
     bpy.ops.object.select_all(action="DESELECT")
@@ -1059,7 +1099,15 @@ def load_renderpeople_asset(
     # Create an empty parent for all imported objects
     bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0, 0, 0))
     parent_obj = bpy.context.active_object
-    parent_obj.name = f"RenderPeople_{os.path.basename(usd_file_path).split('.')[0]}"
+    parent_obj.name = f"Character_{os.path.basename(usd_file_path).split('.')[0]}"
+
+    if dhgen_stage is not None:
+        prepare_import(dhgen_stage, imported_objects, parent_obj, usd_file_path)
+        parent_obj.rotation_euler = rotation
+        parent_obj.scale = scale
+        parent_obj.location = position
+        bpy.context.view_layer.update()
+        return parent_obj
 
     # Parent all imported objects to the empty
     for obj in imported_objects:
@@ -1096,46 +1144,6 @@ def load_renderpeople_asset(
         usd_filename = os.path.basename(usd_file_path)
         # Remove .usd extension and _yup_t suffix if present
         character_base_name = usd_filename.replace(".usd", "").replace("_yup_t", "")
-    character_texture_root = os.path.join(os.path.dirname(usd_file_path), "texture")
-
-    def find_character_diffuse_texture(material_name):
-        if not os.path.isdir(character_texture_root):
-            return None
-        material_key = material_name.lower().removesuffix("_baked")
-        exts = ("*.jpg", "*.jpeg", "*.png")
-        candidates = []
-        for ext in exts:
-            candidates.extend(Path(character_texture_root).rglob(ext))
-        for texture_path in sorted(candidates):
-            rel = str(texture_path.relative_to(character_texture_root)).lower()
-            filename = texture_path.name.lower()
-            if material_key in rel and filename.startswith("diffuse_reflection_color"):
-                return str(texture_path)
-        return None
-
-    def is_transparent_eye_surface(material_name):
-        material_key = material_name.lower().removesuffix("_baked")
-        return material_key in {"base_cornea", "base_lens"}
-
-    def configure_transparent_eye_surface(mat, principled):
-        mat.diffuse_color = (1.0, 1.0, 1.0, 0.0)
-        mat.blend_method = "BLEND"
-        if hasattr(mat, "shadow_method"):
-            mat.shadow_method = "NONE"
-        if hasattr(mat, "use_screen_refraction"):
-            mat.use_screen_refraction = True
-
-        principled.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        principled.inputs["Roughness"].default_value = 0.0
-        if "Alpha" in principled.inputs:
-            for link in list(mat.node_tree.links):
-                if link.to_socket == principled.inputs["Alpha"]:
-                    mat.node_tree.links.remove(link)
-            principled.inputs["Alpha"].default_value = 0.0
-        if "Transmission Weight" in principled.inputs:
-            principled.inputs["Transmission Weight"].default_value = 1.0
-        if "IOR" in principled.inputs:
-            principled.inputs["IOR"].default_value = 1.45
 
     # Ensure all imported objects are visible
     for obj in imported_objects:
@@ -1153,8 +1161,6 @@ def load_renderpeople_asset(
 
                     try:
                         # Set up a basic material if the texture is missing
-                        if not mat.use_nodes:
-                            mat.use_nodes = True
                         if mat.use_nodes:
                             # Try to load texture from texture_dir if exists
                             texture_loaded = False
@@ -1204,40 +1210,6 @@ def load_renderpeople_asset(
                                 else:
                                     print(f"    Texture file not found: {texture_path}")
 
-                            if not texture_loaded:
-                                texture_path = find_character_diffuse_texture(mat.name)
-                                if texture_path:
-                                    print(f"    Found character texture file: {texture_path}")
-
-                                    tex_node = None
-                                    for node in mat.node_tree.nodes:
-                                        if node.type == "TEX_IMAGE":
-                                            tex_node = node
-                                            break
-
-                                    if not tex_node:
-                                        tex_node = mat.node_tree.nodes.new(
-                                            type="ShaderNodeTexImage"
-                                        )
-                                        tex_node.location = (-300, 0)
-
-                                    tex_node.image = bpy.data.images.load(texture_path)
-
-                                    principled = None
-                                    for node in mat.node_tree.nodes:
-                                        if node.type == "BSDF_PRINCIPLED":
-                                            principled = node
-                                            break
-
-                                    if principled:
-                                        base_color = principled.inputs["Base Color"]
-                                        for link in list(base_color.links):
-                                            mat.node_tree.links.remove(link)
-                                        mat.node_tree.links.new(tex_node.outputs["Color"], base_color)
-                                        print("    Connected character texture to material")
-
-                                    texture_loaded = True
-
                             # Check if there are any texture nodes with missing images (if texture wasn't loaded)
                             if not texture_loaded:
                                 nodes_to_remove = []
@@ -1274,13 +1246,8 @@ def load_renderpeople_asset(
                                 principled = nodes.new(type="ShaderNodeBsdfPrincipled")
                                 principled.location = (0, 0)
 
-                            # Cornea/lens materials are transparent overlays. Keeping the generic
-                            # fallback opaque hides the textured eye surface behind them.
-                            default_skin_material_applied = False
-                            if is_transparent_eye_surface(mat.name):
-                                configure_transparent_eye_surface(mat, principled)
-                                print("    Applied transparent eye-surface material")
-                            elif not principled.inputs["Base Color"].is_linked:
+                            # Set a skin-like color if no texture is connected
+                            if not principled.inputs["Base Color"].is_linked:
                                 # Set a neutral skin tone color
                                 principled.inputs["Base Color"].default_value = (
                                     0.8,
@@ -1298,7 +1265,6 @@ def load_renderpeople_asset(
                                 elif "IOR" in principled.inputs:
                                     # Set IOR for skin-like material (1.4 is typical for skin)
                                     principled.inputs["IOR"].default_value = 1.4
-                                default_skin_material_applied = True
 
                             # Find or create output node
                             output = None
@@ -1315,8 +1281,7 @@ def load_renderpeople_asset(
                             if not output.inputs["Surface"].is_linked:
                                 links.new(principled.outputs["BSDF"], output.inputs["Surface"])
 
-                            if default_skin_material_applied:
-                                print("    Applied default skin-tone material")
+                            print("    Applied default skin-tone material")
                     except Exception as e:
                         print(f"    Warning: Could not fix material: {e}")
 
@@ -1325,7 +1290,7 @@ def load_renderpeople_asset(
     transform_obj.hide_render = False
     transform_obj.hide_set(False)
 
-    print("RenderPeople asset loaded and positioned successfully")
+    print("Character asset loaded and positioned successfully")
     return transform_obj
 
 

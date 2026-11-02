@@ -175,7 +175,7 @@ def get_blender_mesh_objects(obj):
     """
     if obj.type == "MESH":
         return [obj]
-    return [child for child in obj.children if child.type == "MESH"]
+    return [child for child in obj.children_recursive if child.type == "MESH"]
 
 
 def _bvh_world_space(obj, depsgraph):
@@ -519,6 +519,7 @@ def save_foundation_pose_camera_data(
     frame_width,
     focal_length,
     foundation_pose_camera_save_path,
+    support_object_names=None,
 ):
     """
     Save camera and object data to pickle file in FoundationPose format
@@ -536,6 +537,22 @@ def save_foundation_pose_camera_data(
     cam_R = np.array(camera_matrix_world)[:3, :3]  # 3 x 3
     cam_t = np.array(camera_matrix_world)[:3, 3]  # 3 x 1
 
+    # Built-in support meshes are read only here, outside the placement/randomization loop.
+    if support_object_names is None:
+        support_object_names = []
+    if (
+        not isinstance(support_object_names, (list, tuple))
+        or any(not isinstance(name, str) or not name for name in support_object_names)
+        or len(set(support_object_names)) != len(support_object_names)
+    ):
+        raise ValueError("support_object_names must contain unique exact Blender object names")
+    support_objects = {}
+    for name in support_object_names:
+        support = bpy.context.scene.objects.get(name)
+        if support is None:
+            raise ValueError(f"Selected support object {name!r} is missing from the scene")
+        support_objects[name] = support
+
     save_init_rendering_data(
         foundation_pose_camera_save_path,
         cam_R,
@@ -550,6 +567,8 @@ def save_foundation_pose_camera_data(
         character.location,
         character.scale,
         static_objects,
+        support_objects=support_objects,
+        source_blend_path=bpy.data.filepath,
     )
 
     # # Create output directory if it doesn't exist
@@ -851,6 +870,21 @@ def setup_object_mask_material(obj, mask_color=(1, 1, 1, 1)):
         obj: Blender object to apply mask material to (can be a mesh or parent with mesh children)
         mask_color: RGBA color for the mask (default: white)
     """
+    meshes = get_blender_mesh_objects(obj)
+    if meshes and all(
+        mesh.data.materials
+        and all(
+            material and material.get("source_material", "").startswith("/DHGen_Root/")
+            for material in mesh.data.materials
+        )
+        for mesh in meshes
+    ):
+        from grail.pipelines.blender.dhgen import mask_material
+
+        for mesh in meshes:
+            for index, material in enumerate(list(mesh.data.materials)):
+                mesh.data.materials[index] = mask_material(material, mask_color)
+        return
     # Create mask material
     mask_mat = bpy.data.materials.new(name=f"{obj.name}_Mask")
     mask_mat.use_nodes = True
@@ -880,7 +914,7 @@ def setup_object_mask_material(obj, mask_color=(1, 1, 1, 1)):
         target_meshes.append(obj)
     elif hasattr(obj, "children"):
         # If it's a parent object, apply to all mesh children
-        for child in obj.children:
+        for child in obj.children_recursive:
             if child.type == "MESH":
                 target_meshes.append(child)
 
@@ -925,9 +959,13 @@ def render_object_mask(obj, mask_output_path, background_color=(0, 0, 0)):
 
     # Store original materials for all objects
     original_materials = {}
+    original_material_indices = {}
     for scene_obj in scene.objects:
         if scene_obj.type == "MESH":
             original_materials[scene_obj.name] = scene_obj.data.materials[:]
+            original_material_indices[scene_obj.name] = [
+                polygon.material_index for polygon in scene_obj.data.polygons
+            ]
 
     # Hide all objects except the target object (and its children if it's a parent)
     original_visibility = {}
@@ -937,7 +975,7 @@ def render_object_mask(obj, mask_output_path, background_color=(0, 0, 0)):
     if obj.type == "MESH":
         target_objects.add(obj)
     elif hasattr(obj, "children"):
-        for child in obj.children:
+        for child in obj.children_recursive:
             if child.type == "MESH":
                 target_objects.add(child)
 
@@ -989,6 +1027,10 @@ def render_object_mask(obj, mask_output_path, background_color=(0, 0, 0)):
             scene_obj.data.materials.clear()
             for mat in original_materials[scene_obj.name]:
                 scene_obj.data.materials.append(mat)
+            for polygon, index in zip(
+                scene_obj.data.polygons, original_material_indices[scene_obj.name]
+            ):
+                polygon.material_index = index
 
 
 def setup_holdout_material(obj):
@@ -1062,15 +1104,19 @@ def render_character_mask(
 
     # Store original materials for all objects
     original_materials = {}
+    original_material_indices = {}
     for scene_obj in scene.objects:
         if scene_obj.type == "MESH":
             original_materials[scene_obj.name] = scene_obj.data.materials[:]
+            original_material_indices[scene_obj.name] = [
+                polygon.material_index for polygon in scene_obj.data.polygons
+            ]
 
     # Get all mesh children of the parent object
     character_meshes = []
     if parent_obj.type == "MESH":
         character_meshes.append(parent_obj)
-    for child in parent_obj.children:
+    for child in parent_obj.children_recursive:
         if child.type == "MESH":
             character_meshes.append(child)
 
@@ -1135,6 +1181,10 @@ def render_character_mask(
             scene_obj.data.materials.clear()
             for mat in original_materials[scene_obj.name]:
                 scene_obj.data.materials.append(mat)
+            for polygon, index in zip(
+                scene_obj.data.polygons, original_material_indices[scene_obj.name]
+            ):
+                polygon.material_index = index
 
 
 def setup_depth_output(depth_output_path):

@@ -19,8 +19,8 @@ and
 
 ## Install
 
-The published Docker image already contains the same `sonic` environment used
-by [retargeting](retargeting.md#install):
+The published Docker image already contains the `sonic` policy-training
+environment:
 
 ```bash
 conda activate sonic
@@ -33,8 +33,9 @@ bash scripts/setup/install_env_sonic.sh
 conda activate sonic
 ```
 
-The source installer sets up Isaac Lab, GMR, GRAIL, and the training stack in
-one conda environment.
+The source installer sets up Isaac Lab, GRAIL, the training stack, and GMR for
+explicit legacy SMPL-X inputs. Default SOMA-to-G1 retargeting uses its own
+Python 3.12 environment and does not run inside `sonic`.
 
 ## Checkpoints
 
@@ -44,7 +45,7 @@ checkpoints for finetuning and reference checkpoints trained on released data ar
 ```bash
 bash scripts/setup/download_checkpoints.sh           # all submodules
 bash scripts/setup/download_checkpoints.sh \
-    --skip-gem-smpl --skip-gem-soma \
+    --skip-gem-smpl --skip-gem-x --skip-mose3 \
     --skip-foundationpose --skip-hunyuan3d           # SONIC only
 ```
 
@@ -68,16 +69,24 @@ relative paths resolve correctly.
 
 ## Preparing retargeted data for training
 
-1. Retarget as in [retargeting.md](retargeting.md). The GRAIL retargeting
-   pipeline writes a `<name>_ha/` directory containing `robot/`, `objects/`,
-   `object_usd/`, and `meta/`.
+The current training loaders consume the established GRAIL motion-library
+layout, not the raw 43-joint G1+DEx3 CSV emitted by the default SOMA
+Retargeter. Released data
+and successful-rollout exports already use this layout. The legacy SMPL-X/GMR
+pipeline can also produce it directly; new SOMA results must first be replayed,
+reviewed, and packaged for SONIC.
+
+1. Prepare a reviewed motion library containing `robot/`, `objects/`,
+   `object_usd/`, and `meta/`. For legacy SMPL-X reconstruction, the GRAIL
+   retargeting pipeline writes a `<name>_ha/` directory with this layout.
 2. Move the retargeted folder to `data/motion_lib/<name>_ha/` — that
    prefix is what the training config loaders expect.
 3. For multi-object HOI sweeps, also place the BPS encodings under
    `data/motion_lib/<name>/bps/` (BPS is data-only; it is not
    parameterized by the hand-action variant).
-4. For terrain-aware data, re-retarget with `--zero_out_wrist` to skip
-   hand IK — see {ref}`terrain-sitting-data`.
+4. For legacy terrain data, re-retarget with `--zero_out_wrist` to skip hand
+   IK. For SOMA manipulation inputs, preserve the 14 DEx3 finger joints and
+   validate the robot + object + table replay before packaging it.
 
 ## Task-general tracking configs overview
 

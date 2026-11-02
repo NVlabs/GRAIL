@@ -64,7 +64,7 @@ import trimesh
 keyboard = None  # lazy import: only loaded when viewer is active (needs X display)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_GMR_IK_CONFIG = _REPO_ROOT / "data" / "g1_smplx" / "gmr_smplx_to_g1.json"
+_GMR_IK_CONFIG = _REPO_ROOT / "data/body_profiles/unitree_g1/smplx/gmr_smplx_to_g1.json"
 IK_CONFIG_DICT["smplx"] = {
     "unitree_g1": _GMR_IK_CONFIG,
     "unitree_g1_with_hands": _GMR_IK_CONFIG,
@@ -1983,7 +1983,7 @@ Example:
     args = parser.parse_args()
 
     # Create G1-proportioned SMPLX model unless disabled.
-    # Uses pre-baked T-pose + scale from `data/g1_smplx/`; a one-time bake
+    # Uses pre-baked T-pose + scale from the G1 SMPL-X body profile; a one-time bake
     # utility (out-of-repo) regenerates them if the underlying Jason betas
     # change, which is rare.
     g1_smplx = None

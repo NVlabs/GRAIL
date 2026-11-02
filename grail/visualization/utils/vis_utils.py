@@ -9,6 +9,16 @@ from grail.core.io import load_mesh
 from grail.core.torch_utils import tensor_to, tensor_to_numpy
 
 
+def embedded_static_mesh(obj_data, device="cuda"):
+    """Read a self-contained support mesh and apply its world transform once."""
+    vertices = torch.as_tensor(obj_data["vertices"], dtype=torch.float32, device=device)
+    faces = torch.as_tensor(obj_data["faces"], dtype=torch.int64, device=device)
+    scale = torch.as_tensor(obj_data["scale"], dtype=torch.float32, device=device)
+    rotation = torch.as_tensor(obj_data["rot"], dtype=torch.float32, device=device)
+    position = torch.as_tensor(obj_data["pos"], dtype=torch.float32, device=device)
+    return (vertices * scale.reshape(3)) @ rotation.reshape(3, 3).T + position.reshape(3), faces
+
+
 def make_checker_board_texture(
     color1="black", color2="white", width=10, height=10, n_tile=15, to_bgr=False
 ):
@@ -80,6 +90,11 @@ def prep_visualizer_input(
         human_vertices, human_faces, human_joints = human_model.generate_mesh(
             human_data, output_joints=True, require_grad=False
         )
+    elif model_type == "soma03":
+        raise ValueError(
+            "SOMA03 visualization requires an explicit human_model with bound "
+            "GEM-X/SOMA-X assets and identity; estimator provenance alone is insufficient"
+        )
     elif model_type == "soma":
         from grail.models.soma_model import generate_soma_mesh, setup_soma_model
 
@@ -147,7 +162,10 @@ def prep_visualizer_input(
     if hoi_data.get("scene_data") is not None:
         static_objects = hoi_data["scene_data"]
         for obj_key, obj_data in static_objects.items():
-            if static_meshes_data is not None and obj_key in static_meshes_data:
+            if "vertices" in obj_data or "faces" in obj_data:
+                static_vertices, static_faces = embedded_static_mesh(obj_data, device=device)
+                static_vertices = static_vertices - trans_init.float()
+            elif static_meshes_data is not None and obj_key in static_meshes_data:
                 cached = static_meshes_data[obj_key]
                 static_vertices = cached["vertices"].to(device).float() - trans_init.float()
                 static_faces = cached["faces"].to(device)
@@ -191,11 +209,14 @@ def prep_visualizer_input(
     return motion_seq if not to_numpy else tensor_to_numpy(motion_seq)
 
 
-def motion_seq_to_scenepic(motion_seq, hoi_data):
-    """Derive scenepic-ready (normalized + numpy) input from an unnormalized motion_seq."""
+def motion_seq_to_scenepic(motion_seq, hoi_data, normalize_trans=True):
+    """Derive ScenePic-ready numpy input from an unnormalized motion sequence."""
     trans = hoi_data["human_data"]["trans"][:, :3]
     trans_init = trans[:1, :].clone()
-    trans_init[0, 2] = 0
+    if normalize_trans:
+        trans_init[0, 2] = 0
+    else:
+        trans_init.zero_()
 
     sp_seq = {}
 

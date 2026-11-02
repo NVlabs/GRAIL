@@ -1,122 +1,102 @@
 # 4D HOI Reconstruction
 
-Recovers the full 4D human-object interaction (SMPL-X body pose + MANO hand
-pose + 6-DoF object trajectory) from a generated or captured RGB video.
+Reconstructs metric human and object motion from generated videos. The public
+default is native SOMA 0.3 human motion predicted by GEM-X, MoGe-3 depth, and
+MoSE3 + FoundationPose hybrid object tracking. The output keeps the existing
+GRAIL contact-label optimization and post-processing path.
 
 ## Quickstart
 
 ```bash
-# Manipulation/pickup — SMPL-X (default, expects object to move)
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results
+# Dynamic object: manipulation / pickup (default)
+python -m grail.pipelines.recon_4dhoi \
+    --dataset ComAsset --category cordless_drill --results_dir results
 
-# Manipulation/pickup — SOMA body model
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results --config configs/recon_4dhoi/manip_soma.yaml
-
-# Terrain / sitting (static object — bypasses FoundationPose)
-python -m grail.pipelines.recon_4dhoi --dataset syn_stairs --results_dir results \
-    --config configs/recon_4dhoi/loco_smplx.yaml
+# Static object: terrain / sitting
+python -m grail.pipelines.recon_4dhoi \
+    --config configs/recon_4dhoi/loco_soma.yaml \
+    --dataset syn_stairs --results_dir results
 ```
 
-Validated outputs land under
-`results/generation/4dhoi_recon_smplx_valid/{dataset}/{category}/{video_id}/`:
+The default config is `configs/recon_4dhoi/manip_soma.yaml`. Validated output
+is written below `results/generation/4dhoi_recon_soma03_valid/`.
 
-- `hoi_data/hoi_data.pkl` — body params + object 6-DoF poses per frame
-- `result_vis/recon_result.mp4` — overlaid reconstruction on the input
-- `result_vis/recon_comparison.mp4` — side-by-side input vs. recon
-- `result_vis/recon_result_top_view.mp4` — top-down view
-- `result_vis/recon_result.html` — interactive ScenePic viewer
-- `mesh_data/` — the canonical object mesh used in optimization
+## Pipeline stages
 
-## Pipeline steps
+1. **Human pose** — GEM-X predicts native SOMA pose, translation, identity,
+   scale, hands, and camera parameters while preserving source FPS and frame
+   count. GRAIL applies the fixed public G1 human identity downstream.
+2. **Masks and depth** — SAM2 tracks human/object masks; the isolated MoGe-3
+   worker predicts depth without changing the main GRAIL PyTorch/Triton stack.
+3. **Object pose** — dynamic-object configs generate metric-CAD proposals from
+   MoSE3 and select/refine them in a closed FoundationPose loop. Static terrain
+   configs use the known rendered object pose.
+4. **HOI optimization** — the original `contact_labels` cache, contact loss,
+   and OpenAI vision contact-joint detection remain unchanged. Set
+   `OPENAI_API_KEY`; the default vision model is `gpt-4o`.
+5. **Filtering** — removes invalid camera, mask, duration, and task-motion cases.
+6. **Post-processing and visualization** — writes canonical human/object motion,
+   contact points, videos, and the ScenePic viewer.
 
-```{list-table}
-:widths: 5 25 70
-:header-rows: 1
-
-* - #
-  - Stage
-  - Notes
-* - 1
-  - Human pose
-  - GEM-SMPL body + WiLoR hands, fused per-frame. ~45 s/video on an L40S.
-* - 2
-  - Preprocess
-  - SAM2 mask tracking + MoGe monocular depth. ~36 s/video.
-* - 3
-  - Object pose
-  - FoundationPose 6-DoF tracking from cached masks + RGB. ~40 s/video.
-* - 4
-  - HOI optimization
-  - Multi-stage; uses OpenAI vision calls inside `grail/core/contact_label.py`
-    to detect contact joints per interval. Defaults use `gpt-4o`.
-    Heaviest stage (~9-10 min/video on L40S).
-* - 5
-  - Filter
-  - Quality thresholds: human-position error, mask alignment, keypoint
-    tracking, contact penalty, penetration, motion magnitude.
-* - 6
-  - Visualize
-  - PyTorch3D top-down + side-by-side renders, ScenePic HTML.
-```
-
-## Required environment
-
-`OPENAI_API_KEY` is used by the OpenAI API for contact-joint detection in step 4.
-The default vision model is `gpt-4o`.
-
-## Common variants
-
-```bash
-# Single video by ID
-python -m grail.pipelines.recon_4dhoi --video_id ComAsset/cordless_drill/<video_name> \
-    --results_dir results
-
-# Skip already-finished videos
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results --skip_done
-
-# Step 4+ only (after rerun of contact detection)
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results --skip_step1 --skip_step2 --skip_step3
-
-# Static-object mode (no global object motion expected)
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results --is_static_obj
-```
+This release does not include autonomous contact authoring or review workflows.
 
 ## Configs
 
-Configs are split by **task** (manipulation vs. locomotion/terrain) × **body model** (SMPL-X vs. SOMA):
-
 ```{list-table}
-:widths: 35 65
+:widths: 32 18 50
 :header-rows: 1
 
-* - File
-  - Purpose
-* - `configs/recon_4dhoi/manip_smplx.yaml`
-  - Manipulation / pickup, SMPL-X (G1) body. `filter_object_motion: dynamic_only` drops static-object recons at step 5; FoundationPose runs (object expected to move). Default for `grail.pipelines.recon_4dhoi`.
+* - Config
+  - Human model
+  - Use
 * - `configs/recon_4dhoi/manip_soma.yaml`
-  - Manipulation / pickup, SOMA body. Same params as `manip_smplx.yaml` — only `body_model` + paths differ.
-* - `configs/recon_4dhoi/loco_smplx.yaml`
-  - Locomotion / terrain / sitting, SMPL-X (G1) body. `is_static_obj: true` bypasses FoundationPose (terrain doesn't move); `filter_object_motion: static_only` keeps only static-object recons.
+  - SOMA 0.3 (default)
+  - Dynamic manipulation/pickup with hybrid object tracking.
 * - `configs/recon_4dhoi/loco_soma.yaml`
-  - Locomotion / terrain / sitting, SOMA body. Same params as `loco_smplx.yaml`.
+  - SOMA 0.3
+  - Static terrain and sitting.
+* - `configs/recon_4dhoi/manip_smplx.yaml`
+  - G1-proportioned SMPL-X
+  - Explicit legacy dynamic-object route.
+* - `configs/recon_4dhoi/loco_smplx.yaml`
+  - G1-proportioned SMPL-X
+  - Explicit legacy static-object route.
 ```
 
-SOMA variants share **all** optimization params with their SMPL-X counterparts — only `body_model` + `hmr_dir` + `output_dir` differ.
+Both SOMA configs use
+`data/body_profiles/unitree_g1/soma/soma03_custom_smplx_identity.npz`.
+The DHGen character is a 2D rendering asset and is not substituted for the
+native SOMA body model.
 
-## Sharded fan-out
+## Runtime selection
+
+Default paths are:
+
+```text
+imports/GEM-X/.venv/bin/python
+.venvs/moge3/bin/python
+.venvs/mose3/bin/python
+imports/MoSE3/ckpt
+```
+
+Override isolated workers with `GRAIL_MOGE_PYTHON`, `GRAIL_MOSE3_PYTHON`,
+`GRAIL_MOSE3_ROOT`, `GRAIL_MOSE3_CHECKPOINT`, or the corresponding YAML keys.
+See [installation](installation.md) for pinned setup commands.
+
+## Resume individual stages
 
 ```bash
-# Run one shard per worker in your scheduler.
-python -m grail.pipelines.recon_4dhoi \
-    --dataset ComAsset \
-    --results_dir results \
-    --job_chunk_idx <i> \
-    --num_job_chunks <N>
+# Human estimation only
+python -m grail.pipelines.recon_4dhoi --skip_step2 --skip_step3 \
+    --skip_step4 --skip_step5 --skip_step6
+
+# Reuse pose and rerun masks/depth/object tracking
+python -m grail.pipelines.recon_4dhoi --skip_step1 \
+    --skip_step4 --skip_step5 --skip_step6
+
+# Reuse prediction/tracking and rerun optimization onward
+python -m grail.pipelines.recon_4dhoi --skip_step1 --skip_step2 --skip_step3
 ```
 
-A typical 8-chunk run covers ~24 videos in ~35 minutes wall-clock (parallel).
+Use a new `results_dir` when changing body representation or predictor binding;
+SOMA and SMPL-X caches are intentionally not interchangeable.

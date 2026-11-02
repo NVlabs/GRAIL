@@ -302,6 +302,8 @@ def prepare_data_for_validation(hoi_data, human_model_cfg, device="cuda"):
     # Generate human and object vertices sequence
     hoi_data["object_path"] = hoi_data["meta"]["obj_path"]
     human_model = create_human_model(human_model_cfg, device=device)
+    if human_model.model_type == "soma03":
+        human_model.load_shape_params(human_model_cfg, None, device)
     motion_seq = prep_visualizer_input(
         hoi_data,
         human_model=human_model,

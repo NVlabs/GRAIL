@@ -1,12 +1,29 @@
-import math
-import os
-import sys
+"""MoGe-3 metric depth adapter with an isolated inference runtime."""
 
-import cv2
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
 import numpy as np
 import torch
-import torch.nn.functional as F
-from tqdm import tqdm
+
+from grail.core.depth_config import MOGE_MODEL_ID, MOGE_MODEL_REVISION
+
+
+def _runtime_python():
+    """Keep MoGe's Triton dependencies out of the reconstruction interpreter."""
+    root = Path(__file__).resolve().parents[2]
+    configured = os.environ.get("GRAIL_MOGE_PYTHON")
+    runtime = Path(configured).expanduser() if configured else root / ".venvs/moge3/bin/python"
+    if not runtime.is_file() or not os.access(runtime, os.X_OK):
+        raise RuntimeError(
+            f"MoGe-3 runtime not found: {runtime}. "
+            "Run scripts/setup/install_moge3.sh with the GRAIL Python environment, "
+            "or set GRAIL_MOGE_PYTHON to an installed MoGe-3 runtime interpreter."
+        )
+    return runtime
 
 
 def est_depth(
@@ -14,76 +31,61 @@ def est_depth(
     device="cuda",
     intrinsics=None,
     gt_depth_first_frame=None,
+    return_metadata=False,
 ):
-    """Estimate per-frame metric depth with MoGe-2.
+    """Estimate native-resolution metric camera-Z depth with pinned MoGe-3 ViT-G.
 
-    Args:
-        image_list: List of image paths.
-        device: Device to run on.
-        intrinsics: Optional camera intrinsics (3, 3) numpy array or path to
-            intrinsics file. Same intrinsics will be used for all images
-            (scaled appropriately if images are different sizes).
-        gt_depth_first_frame: Optional ground truth depth for the first frame
-            (H, W) in meters. Currently unused; kept for API symmetry.
+    The foreground subprocess keeps MoGe dependencies outside the reconstruction
+    interpreter. Invalid or masked pixels remain zero. GT alignment is performed
+    separately by preprocessing; gt_depth_first_frame is kept for compatibility
+    and is not supplied to the network. return_metadata adds worker provenance.
     """
-    moge_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "imports", "MoGe")
-    moge_dir = os.path.abspath(moge_dir)
-    if moge_dir not in sys.path:
-        sys.path.insert(0, moge_dir)
-
-    from moge.model.v2 import MoGeModel
-
-    print("Loading MoGe-2 model (Ruicheng/moge-2-vitl-normal)...")
-    model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device).eval()
-
-    original_image_size = cv2.imread(image_list[0]).shape[:2]
-
-    # Convert camera intrinsics to horizontal FOV in degrees
-    fov_x = None
-    if intrinsics is not None:
-        if isinstance(intrinsics, str):
-            K = np.loadtxt(intrinsics)
-        else:
-            K = np.array(intrinsics)
-        fx = K[0, 0]
-        W = original_image_size[1]
-        fov_x = 2 * math.atan(W / (2 * fx)) * 180.0 / math.pi
-        print(f"Using known intrinsics: fx={fx:.2f}, image_width={W}, fov_x={fov_x:.2f} degrees")
+    images = [str(Path(p).expanduser().resolve()) for p in image_list]
+    if not images:
+        raise ValueError("MoGe-3 requires at least one input image")
+    for path in images:
+        if not Path(path).is_file():
+            raise FileNotFoundError(path)
+    if isinstance(intrinsics, (str, os.PathLike)):
+        K = np.loadtxt(intrinsics)
+    elif intrinsics is not None:
+        K = np.asarray(intrinsics)
     else:
-        print("No intrinsics provided, MoGe will recover focal length internally")
-
-    depth_list = []
-    for image_path in tqdm(image_list, desc="Estimating depth (MoGe)"):
-        img = cv2.imread(image_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        image_tensor = torch.tensor(img / 255.0, dtype=torch.float32, device=device).permute(
-            2, 0, 1
+        K = None
+    if K is not None:
+        if K.shape != (3, 3) or not np.isfinite(K).all() or K[0, 0] <= 0 or K[1, 1] <= 0:
+            raise ValueError("intrinsics must be a finite 3x3 matrix with positive focal lengths")
+    worker = Path(__file__).with_name("moge_depth_worker.py")
+    runtime = _runtime_python()
+    request = {
+        "images": images,
+        "device": str(device),
+        "intrinsics": K.tolist() if K is not None else None,
+    }
+    with tempfile.TemporaryDirectory(prefix="grail-moge3-") as tmp:
+        request_path, output_path = Path(tmp) / "request.json", Path(tmp) / "depth.pt"
+        request_path.write_text(json.dumps(request))
+        subprocess.run(
+            [
+                str(runtime),
+                str(worker),
+                "--request",
+                str(request_path),
+                "--output",
+                str(output_path),
+            ],
+            check=True,
         )
-
-        with torch.no_grad():
-            output = model.infer(image_tensor, fov_x=fov_x, resolution_level=9, use_fp16=True)
-
-        depth = output["depth"]  # (H, W), metric meters
-
-        # Replace invalid pixels (inf) with 0
-        depth = torch.where(torch.isinf(depth), torch.zeros_like(depth), depth)
-
-        # Resize to original image size if needed
-        if depth.shape != tuple(original_image_size):
-            depth = (
-                F.interpolate(
-                    depth.unsqueeze(0).unsqueeze(0),
-                    size=original_image_size,
-                    mode="nearest",
-                )
-                .squeeze(0)
-                .squeeze(0)
-            )
-
-        depth_list.append(depth)
-
-    del model
-    torch.cuda.empty_cache()
-    print(f"MoGe: produced {len(depth_list)} metric depth frames")
-
-    return depth_list
+        result = torch.load(output_path, map_location=device, weights_only=True)
+    metadata, depth_list = result["metadata"], result["depth_list"]
+    if (
+        metadata.get("model_id") != MOGE_MODEL_ID
+        or metadata.get("model_revision") != MOGE_MODEL_REVISION
+    ):
+        raise RuntimeError("MoGe worker returned unexpected model provenance")
+    if len(depth_list) != len(images):
+        raise RuntimeError("MoGe worker returned a different frame count")
+    for i, depth in enumerate(depth_list):
+        if depth.ndim != 2 or not torch.isfinite(depth).all() or torch.any(depth < 0):
+            raise RuntimeError(f"Invalid MoGe-3 depth tensor for frame {i}")
+    return (depth_list, metadata) if return_metadata else depth_list

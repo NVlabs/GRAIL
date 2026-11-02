@@ -1,0 +1,38 @@
+# MoSE3 CAD-PnP proposals followed by closed-loop FoundationPose selection.
+# Native source-image pixels; proposal availability and quality stay separate.
+# Runtime locations may be overridden with GRAIL_MOSE3_{PYTHON,ROOT,CHECKPOINT}
+# and GRAIL_FOUNDATIONPOSE_ROOT. Relative paths resolve from the GRAIL checkout.
+runtime:
+  mose3_python: .venvs/mose3/bin/python
+  mose3_root: imports/MoSE3
+  mose3_checkpoint: imports/MoSE3/ckpt
+  foundationpose_root: imports/FoundationPose
+proposals:
+  max_edge: 756
+  window_targets: 120
+  max_queries: 2048
+  sampling: raster_uniform
+  erosion_radius: 1
+pnp:
+  reprojection_error_px: 10.0
+  max_median_residual_px: 10.0
+  min_inlier_fraction: 0.30
+  min_inliers: 12
+  seed: 0
+hybrid:
+  track_iterations: 2
+  proposal_refine_iterations: 2
+  score_margin: 0.05
+  observed_depth: zero
+  proposal_policy: quality_pass
+  tie_policy: continuation
+  nonfinite_score_policy: continuation
+  sole_valid_proposal_rescue: true
+  smoothing: false
+postprocessing:
+  object_trajectory:
+    enabled: true
+    method: savgol
+    window_length: 9
+    polyorder: 3
+    preserve_initial_pose: true

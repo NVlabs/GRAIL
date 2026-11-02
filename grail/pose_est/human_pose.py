@@ -4,8 +4,8 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from grail.adapters.wilor import infer_hand_pose
 from grail.core.torch_utils import tensor_to, tensor_to_numpy
+from grail.core.video import get_video_fps_and_frame_count
 from grail.pose_est.utils import smooth_axis_angle_sequence, smooth_pose_sequence
 
 
@@ -344,14 +344,26 @@ def interp_smplx_mano_predictions(smplx_params):
     return smplx_params
 
 
-def run_human_pose_est_smplx(video_path, cache_dir, smplx_model_path=None):
+def run_human_pose_est_smplx(
+    video_path, cache_dir, smplx_model_path=None, *, human_model_config=None
+):
     """
     Predict human pose using GENMO
     """
     from grail.adapters.gem_smpl import infer_human_pose as infer_human_pose_smplx
+    from grail.adapters.wilor import infer_hand_pose
 
+    cfg = dict(human_model_config or {})
+    smplx_model_path = smplx_model_path or cfg.get("smplx_model_path")
+    source_fps, _ = get_video_fps_and_frame_count(video_path)
     smplx_pred = infer_human_pose_smplx(
-        video_path, cache_dir, is_static_cam=True
+        video_path,
+        cache_dir,
+        is_static_cam=bool(cfg.get("static_cam", True)),
+        human_crop_repair=cfg.get("gem_smpl_human_crop_repair", False),
+        human_crop_masks=cfg.get("gem_smpl_human_crop_masks"),
+        human_crop_receipt=cfg.get("gem_smpl_human_crop_receipt"),
+        human_crop_config=cfg.get("gem_smpl_human_crop_config"),
     )  # WARNING: static_cam=True is used to avoid droid slam failure
     smplx_global = smplx_pred["smpl_params_global"]
     data_path = os.path.join(os.path.dirname(__file__), "..", "constants", "smplx_handposes.npz")
@@ -463,7 +475,7 @@ def run_human_pose_est_smplx(video_path, cache_dir, smplx_model_path=None):
         trans=incam_trans,
         left_hand_pose=left_hand_pose,
         right_hand_pose=right_hand_pose,
-        mocap_frame_rate=30,
+        mocap_frame_rate=source_fps,
         gender="neutral",
         vitpose=smplx_pred["vitpose"],
         hand_keypoints_2d=hand_keypoints_2d,
@@ -493,12 +505,15 @@ def run_human_pose_est_smplx(video_path, cache_dir, smplx_model_path=None):
         trans=global_trans,
         left_hand_pose=left_hand_pose,
         right_hand_pose=right_hand_pose,
-        mocap_frame_rate=30,
+        mocap_frame_rate=source_fps,
         gender="neutral",
     )
 
     motion_incam["model"] = "smplx"
     motion_global["model"] = "smplx"
+    if "estimator_provenance" in smplx_pred:
+        for motion_space in (motion_incam, motion_global):
+            motion_space["estimator_provenance"] = dict(smplx_pred["estimator_provenance"])
 
     # Compute predicted body height from HMR-predicted betas (using raw SMPLX).
     # Stored upstream so downstream consumers (e.g. G1SmplxHumanModel, which
@@ -511,9 +526,7 @@ def run_human_pose_est_smplx(video_path, cache_dir, smplx_model_path=None):
     from grail.models.smplx_model import get_tpose_human_height, setup_smplx_model
 
     smplx_model_dir = os.path.dirname(os.path.dirname(smplx_model_path))
-    smplx_model = setup_smplx_model(
-        model_path=smplx_model_dir, flat_hand_mean=True, device="cpu"
-    )
+    smplx_model = setup_smplx_model(model_path=smplx_model_dir, flat_hand_mean=True, device="cpu")
     predicted_body_height = float(
         get_tpose_human_height(smplx_model, betas=incam_betas.cpu(), device="cpu")
     )
@@ -525,271 +538,88 @@ def run_human_pose_est_smplx(video_path, cache_dir, smplx_model_path=None):
     return motion
 
 
-def run_human_pose_est_soma(video_path, cache_dir, soma_model_path=None):
-    """Predict human pose using GENMO NOVA model (SOMA body).
+def run_human_pose_est_soma03(video_path, cache_dir, human_model_config):
+    """Estimate native SOMA03 motion before any fixed G1 identity substitution."""
+    from grail.models.soma03_model import Soma03HumanModel
 
-    Returns dict with motion_global and motion_incam in SOMA format.
-    """
-    if soma_model_path is None:
+    cfg = dict(human_model_config or {})
+    backend = cfg.get("human_pose_backend", "gem_x")
+    if backend != "gem_x":
         raise ValueError(
-            "soma_model_path is required to compute predicted_body_height. "
-            "Pass it from the pipeline config (human_model.soma_model_path)."
+            f"Unsupported SOMA03 human_pose_backend: {backend!r}; use the public GEM-X backend"
         )
+    from grail.adapters.gem_x_soma import infer_human_pose, prediction_to_motion
 
-    from grail.adapters.gem_soma import infer_human_pose as infer_human_pose_soma
-
-    soma_pred = infer_human_pose_soma(video_path, cache_dir, is_static_cam=True)
-
-    soma_global = soma_pred["smpl_params_global"]
-    soma_incam = soma_pred["smpl_params_incam"]
-    frame_num = soma_global["body_pose"].shape[0]
-
-    def _build_params(src):
-        params = {
-            k: src[k].clone()
-            for k in (
-                "body_pose",
-                "global_orient",
-                "transl",
-                "identity_coeffs",
-                "scale_params",
-                "left_hand_pose",
-                "right_hand_pose",
-            )
-            if k in src
-        }
-        if params["body_pose"].dim() == 2:
-            params["body_pose"] = params["body_pose"].reshape(frame_num, 76, 3)
-        return params
-
-    fused_soma_global = _build_params(soma_global)
-    fused_soma_incam = _build_params(soma_incam)
-    hand_keypoints_2d = torch.zeros((frame_num, 32, 3))
-
-    # Get vitpose from prediction
-    vitpose = soma_pred.get("vitpose", None)
-
-    # Get foot contact probs if available
-    foot_contact_probs = None
-    if "net_outputs" in soma_pred and "model_output" in soma_pred["net_outputs"]:
-        if "static_conf_logits" in soma_pred["net_outputs"]["model_output"]:
-            static_conf_logits = soma_pred["net_outputs"]["model_output"]["static_conf_logits"]
-            foot_contact_probs = torch.sigmoid(static_conf_logits[:, :, :4]).squeeze(0)
-
-    # Build motion_incam dict with NOVA format
-    # SOMA poses: global_orient (3) + body_pose (76×3 = 228) = 231 dims
-    body_pose_incam = fused_soma_incam["body_pose"].reshape(frame_num, -1)  # (L, 228)
-    global_orient_incam = fused_soma_incam["global_orient"].reshape(frame_num, 3)  # (L, 3)
-
-    # Concatenate into full pose vector: global_orient + body_pose
-    incam_poses = torch.cat([global_orient_incam, body_pose_incam], dim=1)  # (L, 231)
-
-    # Get shape params (use mean across frames)
-    identity_coeffs_incam = fused_soma_incam["identity_coeffs"]
-    if identity_coeffs_incam.dim() == 2:
-        identity_coeffs_incam = identity_coeffs_incam[0]  # Take first frame
-    scale_params_incam = fused_soma_incam["scale_params"]
-    if scale_params_incam.dim() == 2:
-        scale_params_incam = scale_params_incam[0]  # Take first frame
-
-    zero_hand = torch.zeros((frame_num, 72))
-    motion_incam = dict(
-        poses=incam_poses,  # (L, 231) = global_orient (3) + body_pose (228)
-        identity_coeffs=identity_coeffs_incam,  # (45,)
-        scale_params=scale_params_incam,  # (75,)
-        trans=fused_soma_incam["transl"].reshape(frame_num, 3),  # (L, 3)
-        left_hand_pose=fused_soma_incam.get("left_hand_pose", zero_hand).reshape(frame_num, -1),
-        right_hand_pose=fused_soma_incam.get("right_hand_pose", zero_hand).reshape(frame_num, -1),
-        mocap_frame_rate=30,
-        gender="neutral",
-        model_type="soma",  # Indicate NOVA format
-        vitpose=vitpose,
-        hand_keypoints_2d=hand_keypoints_2d,
-        foot_contact_probs=foot_contact_probs,
-        K_fullimg=soma_pred.get("K_fullimg", None),
+    for field in ("gem_x_source_root", "gem_x_config_path", "gem_x_python"):
+        if not cfg.get(field):
+            raise ValueError(f"human_model.{field} is required for human_pose_backend=gem_x")
+    prediction = infer_human_pose(
+        video_path,
+        cache_dir,
+        source_root=cfg["gem_x_source_root"],
+        config_path=cfg["gem_x_config_path"],
+        python=cfg["gem_x_python"],
+        device=cfg.get("gem_x_device", "cuda"),
+        is_static_cam=cfg.get("static_cam", True),
+        human_crop_repair=cfg.get("gem_x_human_crop_repair", True),
+        human_crop_masks=cfg.get("gem_x_human_crop_masks"),
+        human_crop_receipt=cfg.get("gem_x_human_crop_receipt"),
+        human_crop_config=cfg.get("gem_x_human_crop_config"),
+        postprocess=cfg.get("gem_x_postprocess", False),
+        soma_assets=cfg.get("gem_x_soma_assets"),
     )
+    motion = prediction_to_motion(prediction)
 
-    # Build motion_global dict with NOVA format
-    body_pose_global = fused_soma_global["body_pose"].reshape(frame_num, -1)  # (L, 228)
-    global_orient_global = fused_soma_global["global_orient"].reshape(frame_num, 3)  # (L, 3)
-
-    global_poses = torch.cat([global_orient_global, body_pose_global], dim=1)  # (L, 231)
-
-    identity_coeffs_global = fused_soma_global["identity_coeffs"]
-    if identity_coeffs_global.dim() == 2:
-        identity_coeffs_global = identity_coeffs_global[0]
-    scale_params_global = fused_soma_global["scale_params"]
-    if scale_params_global.dim() == 2:
-        scale_params_global = scale_params_global[0]
-
-    motion_global = dict(
-        poses=global_poses,  # (L, 231)
-        identity_coeffs=identity_coeffs_global,  # (45,)
-        scale_params=scale_params_global,  # (75,)
-        trans=fused_soma_global["transl"].reshape(frame_num, 3),  # (L, 3)
-        left_hand_pose=fused_soma_global.get("left_hand_pose", zero_hand).reshape(frame_num, -1),
-        right_hand_pose=fused_soma_global.get("right_hand_pose", zero_hand).reshape(frame_num, -1),
-        mocap_frame_rate=30,
-        gender="neutral",
-        model_type="soma",
-    )
-
-    motion_global["model"] = "soma"
-    motion_incam["model"] = "soma"
-
-    # Compute predicted body height from HMR-predicted identity/scale params
-    # (using raw SOMA model, not the optimizer-baked one).
-    from grail.models.soma_model import (
-        get_tpose_human_height as get_tpose_human_height_soma,
-        setup_soma_model,
-    )
-
-    soma_model = setup_soma_model(model_path=soma_model_path, device="cpu")
-    predicted_body_height = float(
-        get_tpose_human_height_soma(
-            soma_model,
-            identity_coeffs=identity_coeffs_incam.cpu(),
-            scale_params=scale_params_incam.cpu(),
-            device="cpu",
-        )
-    )
-    motion_incam["predicted_body_height"] = predicted_body_height
-    motion_global["predicted_body_height"] = predicted_body_height
-
-    motion = dict(
-        motion_global=motion_global,
-        motion_incam=motion_incam,
-    )
-
+    # Source height is derived from the predicted identity, never the fixed G1
+    # identity. Downstream placement consumes this stored height when swapping
+    # identities; it must not mutate the native fixed-global-scale channel.
+    source_cfg = dict(cfg)
+    source_cfg.pop("soma_identity_params_path", None)
+    source_model = Soma03HumanModel(source_cfg, device="cpu")
+    source_height = float(source_model.compute_tpose_height(motion["motion_incam"]))
+    if not np.isfinite(source_height) or source_height <= 0:
+        raise ValueError("Predicted SOMA03 source identity has an invalid body height")
+    for space in ("motion_incam", "motion_global"):
+        motion[space]["predicted_body_height"] = source_height
+        motion[space]["estimator_provenance"]["predicted_body_height_m"] = source_height
+        motion[space]["estimator_provenance"]["predicted_height_identity"] = "native_estimator"
     return motion
 
 
 def run_human_pose_est(
-    video_path, model="smplx", cache_dir="cache", smplx_model_path=None, soma_model_path=None
+    video_path,
+    model="soma03",
+    cache_dir="cache",
+    *,
+    human_model_config=None,
 ):
-    if model in ["smplx", "g1_smplx"]:
+    """Predict with the selected native estimator; never convert/fall back silently."""
+    if model not in ("soma03", "smplx", "g1_smplx"):
+        raise ValueError(
+            "Human pose prediction requires soma03 (GEM-X) or explicit smplx/g1_smplx (GEM-SMPL)."
+        )
+    if human_model_config is None:
+        from grail.core.config import load_recon_config
+
+        config_path = None if model == "soma03" else "configs/recon_4dhoi/manip_smplx.yaml"
+        cfg, _ = load_recon_config(config_path)
+        human_model_config = cfg["human_model"]
+        if model == "smplx":
+            human_model_config = {**human_model_config, "body_model": "smplx"}
+    if human_model_config.get("body_model", "soma03") != model:
+        raise ValueError("Human model configuration and requested backend must agree")
+    if model in ("smplx", "g1_smplx"):
+        # G1 shape is a downstream reconstruction choice. Raw prediction is the
+        # estimator's SMPL-X body, never a SOMA conversion or baked G1 body.
         return run_human_pose_est_smplx(
-            video_path, cache_dir=cache_dir, smplx_model_path=smplx_model_path
+            video_path, cache_dir=cache_dir, human_model_config=human_model_config
         )
-    elif model == "soma":
-        return run_human_pose_est_soma(
-            video_path, cache_dir=cache_dir, soma_model_path=soma_model_path
-        )
-    else:
-        raise ValueError(f"Invalid model type: {model}")
+    return run_human_pose_est_soma03(
+        video_path, cache_dir=cache_dir, human_model_config=human_model_config
+    )
 
 
 if __name__ == "__main__":
-    import argparse
+    from grail.cli.estimate_soma_motion import main
 
-    parser = argparse.ArgumentParser(
-        description="Run human pose estimation from video input using SMPL-X or NOVA model."
-    )
-    parser.add_argument("--video_path", "-v", type=str, required=True, help="Path to input video")
-    parser.add_argument(
-        "--model",
-        "-m",
-        type=str,
-        default="smplx",
-        choices=["smplx", "soma"],
-        help="Model type: smplx (SMPL-X body model) or soma (SOMA 77-joint model). Default: smplx",
-    )
-    parser.add_argument(
-        "--output_path",
-        "-o",
-        type=str,
-        default=None,
-        help="Path to save results (.pt file). If not specified, results are not saved.",
-    )
-    parser.add_argument(
-        "--save_mesh", action="store_true", help="Save mesh visualization to output directory"
-    )
-    parser.add_argument(
-        "--mesh_dir",
-        type=str,
-        default="output/pose_est_meshes",
-        help="Directory for mesh output. Default: output/pose_est_meshes",
-    )
-    args = parser.parse_args()
-
-    print(f"[Pose Estimation] Input video: {args.video_path}")
-    print(f"[Pose Estimation] Model type: {args.model}")
-
-    # Run pose estimation based on model type
-    motion_result = run_human_pose_est(args.video_path, args.model)
-
-    # Print summary
-    motion_global = motion_result["motion_global"]
-    motion_incam = motion_result["motion_incam"]
-    num_frames = motion_global["poses"].shape[0]
-    print(f"[Pose Estimation] Processed {num_frames} frames")
-    print(f"[Pose Estimation] Pose shape: {motion_global['poses'].shape}")
-
-    # Save results if output_path specified
-    if args.output_path:
-        torch.save(motion_result, args.output_path)
-        print(f"[Pose Estimation] Results saved to: {args.output_path}")
-
-    # Generate mesh visualizations if requested
-    if args.save_mesh:
-        os.makedirs(args.mesh_dir, exist_ok=True)
-
-        if args.model == "soma":
-            # SOMA mesh generation
-            from grail.core.io import save_mesh
-            from grail.models.soma_model import generate_soma_mesh, setup_soma_model
-
-            soma_model = setup_soma_model(
-                model_path=None,
-                device="cuda",
-            )
-
-            # Convert motion_global to format expected by generate_soma_mesh
-            global_motion = motion_result["motion_global"]
-            poses = tensor_to(global_motion["poses"], device="cuda")  # (L, 231)
-            frame_num = poses.shape[0]
-
-            # Split poses into global_orient and body_pose
-            global_orient = poses[:, :3]  # (L, 3)
-            body_pose = poses[:, 3:].reshape(frame_num, 76, 3)  # (L, 76, 3)
-
-            soma_motion_data = {
-                "global_orient": global_orient,
-                "body_pose": body_pose,
-                "identity_coeffs": tensor_to(global_motion["identity_coeffs"], device="cuda"),
-                "scale_params": tensor_to(global_motion["scale_params"], device="cuda"),
-                "transl": tensor_to(global_motion["trans"], device="cuda"),
-            }
-
-            soma_verts_seq, soma_faces = generate_soma_mesh(
-                soma_model, soma_motion_data, output_joints=False, require_grad=False, device="cuda"
-            )
-
-            for i in range(soma_verts_seq.shape[0]):
-                verts = tensor_to_numpy(soma_verts_seq[i])
-                faces = tensor_to_numpy(soma_faces)
-                mesh_path = os.path.join(args.mesh_dir, f"soma_mesh_{i:04d}.obj")
-                save_mesh(verts, faces, mesh_path)
-
-            print(f"[Pose Estimation] Saved {num_frames} NOVA meshes to: {args.mesh_dir}")
-        else:
-            # SMPL-X mesh generation
-            from grail.core.io import save_mesh
-            from grail.models.smplx_model import generate_smplx_mesh, setup_smplx_model
-
-            smplx_model = setup_smplx_model(
-                model_path=None,
-                flat_hand_mean=True,
-            )
-            global_motion_data = tensor_to(motion_result["motion_global"], device="cuda")
-            smplx_verts_seq, smplx_faces = generate_smplx_mesh(smplx_model, global_motion_data)
-
-            for i in range(smplx_verts_seq.shape[0]):
-                verts = tensor_to_numpy(smplx_verts_seq[i])
-                faces = tensor_to_numpy(smplx_faces)
-                mesh_path = os.path.join(args.mesh_dir, f"smplx_mesh_{i:04d}.obj")
-                save_mesh(verts, faces, mesh_path)
-
-            print(f"[Pose Estimation] Saved {num_frames} meshes to: {args.mesh_dir}")
-
-    print("[Pose Estimation] Done!")
+    raise SystemExit(main())

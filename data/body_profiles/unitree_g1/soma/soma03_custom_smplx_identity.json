@@ -1,0 +1,28 @@
+{
+  "schema": "grail.soma03.identity128.fixed_identity_scale.local56.v2",
+  "model": "soma03",
+  "status": "accepted_approximate_public_g1_human_identity",
+  "identity": "soma03_custom_smplx_identity.npz",
+  "identity_sha256": "a29f000395d0af1a8796fb77e7b92315449258ce98e50c038006f57b600311a3",
+  "identity_bytes": 13822,
+  "artifacts": {
+    "soma03_custom_smplx_identity.npz": "a29f000395d0af1a8796fb77e7b92315449258ce98e50c038006f57b600311a3"
+  },
+  "sources": {
+    "legacy/assets/soma03/SOMA_neutral.npz": "0bfde60903533f2a4abc989579d0d161fb0dc8d5301ecd17fd4a9168be543083",
+    "legacy/assets/soma03/SOMA_template_rig.usda": "a952cb7bdf4ccd801e355d53122d395b985b69d0d9181439edad5081bb171856",
+    "legacy/assets/soma03/SOMA_procedural_transforms.json": "9853e19ab51625ffaa7d9e7ccf0e443272c2740837604e6bacd66604e8edf509",
+    "legacy/source/SOMA03/soma/body/soma.py": "42b15194e10a3a1a7c4e00ac4d7d7247cbceefb1a003c76c7ea156436507b418",
+    "legacy/source/SOMA03/soma/body/identity_model.py": "0041215e7a3c849803e4c64045e28ad17d352907baa340989deaab94d972d380",
+    "legacy/source/GEM/gem/utils/soma_utils/soma_layer.py": "b173f1525622760c5b4ef35380dc1925e692fcaa8d6f54a02d72f9321e13a059"
+  },
+  "global_scale": 0.7735832333564758,
+  "global_scale_policy": "fixed_identity_parameter",
+  "runtime_external_scale": 1.0,
+  "usage": "default downstream identity for the public Unitree G1 SOMA reconstruction profile",
+  "render_character": "../characters/dhgen_00008/manifest.json",
+  "limitations": [
+    "Approximate body identity; not vertexwise equality to the DHGen render asset.",
+    "Motion/contact quality and hardware safety require separate validation."
+  ]
+}

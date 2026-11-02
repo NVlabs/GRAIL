@@ -11,6 +11,7 @@ Steps:
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -40,7 +41,17 @@ def _build_blender_cmd(script_path, script_args):
         raise FileNotFoundError(
             f"Blender not found at {blender_bin}. Run: bash scripts/setup/install_env_docker.sh"
         )
-    return [blender_bin, "--background", "--python", script_path, "--"] + script_args
+    # Blender can carry an editable installation pointing at another checkout.
+    # Bind imports to the same checkout as this entrypoint before loading a script.
+    return [
+        blender_bin,
+        "--background",
+        "--python-expr",
+        f"import sys; sys.path.insert(0, {project_root!r})",
+        "--python",
+        script_path,
+        "--",
+    ] + script_args
 
 
 def _get_object_extents(object_path):
@@ -339,6 +350,18 @@ def step1_simulate_initial_state(dataset, category, args):
     )
 
 
+def _character_render_args(args):
+    """Keep the exact character asset and its units identical in both render stages."""
+    result = []
+    if args.character:
+        result.extend(["--character_name", args.character])
+    if getattr(args, "character_usd", None):
+        result.extend(["--character_usd", args.character_usd])
+    if getattr(args, "character_scale", None) is not None:
+        result.extend(["--character_scale", *map(str, args.character_scale)])
+    return result
+
+
 def step2_determine_obj_scale(dataset, category, args):
     """Step 2: Determine object scale via exponential + binary search with ChatGPT evaluation."""
     output_dir = os.path.join(args.obj_scale_dir, dataset, category)
@@ -408,8 +431,7 @@ def step2_determine_obj_scale(dataset, category, args):
                 "--texture_dir",
                 args.texture_dir,
             ]
-            if args.character:
-                scale_args.extend(["--character_name", args.character])
+            scale_args.extend(_character_render_args(args))
             if args.use_initial_state:
                 scale_args.append("--use_initial_state")
             if args.gpu:
@@ -560,8 +582,7 @@ def step3_render_blender_scene(dataset, category, args):
         if not args.skip_step2:
             script_args.extend(["--obj_scale_dir", args.obj_scale_dir])
             script_args.append("--use_obj_scale")
-        if args.character:
-            script_args.extend(["--character_name", args.character])
+        script_args.extend(_character_render_args(args))
         if args.character_init_pose_file:
             script_args.extend(["--character_init_pose_file"] + args.character_init_pose_file)
         if args.scene:
@@ -1055,6 +1076,19 @@ def main():
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--video_output_dir", type=str, default="generation/videos_kling")
     parser.add_argument("--character", type=str, default=None)
+    parser.add_argument(
+        "--character_usd",
+        type=str,
+        default=None,
+        help="Exact native character USD; --character remains its output identifier.",
+    )
+    parser.add_argument(
+        "--character_scale",
+        type=float,
+        nargs=3,
+        default=None,
+        help="External character scale; use 1 1 1 for meter-valued USD assets.",
+    )
     parser.add_argument("--character_init_pose_file", type=str, default=None)
     parser.add_argument("--base_prompt", type=str, default=None)
     parser.add_argument("--num_rand_scenes", type=int, nargs="+", default=[1])
@@ -1095,6 +1129,26 @@ def main():
 
     if args.dataset is None:
         parser.error("--dataset is required")
+    if args.character_usd:
+        if not args.character or args.character == "G1":
+            parser.error("--character_usd requires a non-G1 --character output identifier")
+        args.character_usd = os.path.abspath(os.path.expanduser(args.character_usd))
+        if not os.path.isfile(args.character_usd):
+            parser.error(f"Character USD does not exist: {args.character_usd}")
+    if args.character_scale is not None:
+        # YAML defaults bypass argparse's type/nargs conversion. Normalize them
+        # here as well so malformed scales fail before a render is launched.
+        try:
+            if not isinstance(args.character_scale, (list, tuple)) or any(
+                isinstance(value, bool) for value in args.character_scale
+            ):
+                raise ValueError
+            scale = [float(value) for value in args.character_scale]
+            if len(scale) != 3 or any(not math.isfinite(value) or value <= 0 for value in scale):
+                raise ValueError
+        except (TypeError, ValueError):
+            parser.error("--character_scale must contain three finite positive numbers")
+        args.character_scale = scale
 
     args._pipeline_cfg = pipeline_cfg
     args._object_config_dict = pipeline_cfg.get("objects", {})

@@ -53,7 +53,7 @@ class G1SmplxHumanModel(SmplxHumanModel):
       transform_global_motion – uses g1 model, zeros betas
     """
 
-    G1_SMPLX_DIR = "data/g1_smplx"
+    G1_SMPLX_DIR = "data/body_profiles/unitree_g1/smplx"
     G1_PARAM_FILE = "g1_smplx_param.npz"
     G1_TPOSE_FILE = "g1_smplx_tpose.obj"
 
@@ -83,7 +83,7 @@ class G1SmplxHumanModel(SmplxHumanModel):
         return vertices, faces
 
     def load_shape_params(self, cfg, character_name, device):
-        """Load G1 shape params and T-pose mesh from centralized data/g1_smplx/."""
+        """Load G1 shape params and T-pose mesh from its canonical body profile."""
         from grail.models.smplx_model import load_smplx_beta
 
         hm_cfg = cfg.get("human_model", cfg)

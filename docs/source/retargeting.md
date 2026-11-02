@@ -1,177 +1,151 @@
 # Retargeting
 
-Convert GRAIL 4D HOI reconstructions (the output of `grail.pipelines.recon_4dhoi`) into
-G1 robot motion trajectories consumable by the task-general tracking stack
-under {src}`imports/SONIC/`.
-
-The retargeting pipeline is a standalone subpackage:
-{src}`grail/retargeting/`. All steps run as plain CLI tools.
+Native SOMA-to-Unitree-G1+DEx3 retargeting is the public default. GRAIL exports the
+reconstructed SOMA 0.3 forward kinematics to a hash-bound BVH and invokes the
+pinned public [NVIDIA SOMA Retargeter](https://github.com/NVIDIA/soma-retargeter).
+The older SMPL-X-to-G1 GMR path remains available for explicit legacy configs.
 
 ## Install
 
-1. Initialize the GMR submodule:
-   ```bash
-   git submodule update --init imports/GMR
-   ```
+```bash
+git submodule update --init imports/soma-retargeter imports/GMR
+bash scripts/setup/install_soma_retargeter.sh
+```
 
-2. In the published Docker image, activate the preinstalled environment:
+The helper verifies the pinned source revisions and the original GMR
+G1-with-DEx3 MJCF, hydrates the bundled Unitree G1 assets, and creates
+`imports/soma-retargeter/.venv` from its lock file. This isolated
+Python 3.12 environment owns the pinned Newton, Warp, USD, NumPy, and SciPy
+dependencies; they must not be installed into GRAIL or SONIC. Other robot
+embodiments are not exposed by the GRAIL wrapper in this release.
 
-   ```bash
-   conda activate sonic
-   ```
+## SOMA to Unitree G1 + DEx3
 
-   For a source installation, run the one-shot installer from the GRAIL root:
-
-   ```bash
-   bash scripts/setup/install_env_sonic.sh
-   ```
-
-   This creates the `sonic` environment and installs Isaac Sim, Isaac Lab,
-   public GMR, GRAIL, and the remaining retargeting/training dependencies.
-   GRAIL-specific GMR behavior is applied at runtime by
-   {blob}`grail.adapters.gmr <grail/adapters/gmr.py>`; the public GMR submodule
-   is not modified. The script is idempotent.
-
-   Override the env name via `GRAIL_SONIC_ENV=<name>`:
-   ```bash
-   GRAIL_SONIC_ENV=my_sonic_env bash scripts/setup/install_env_sonic.sh
-   ```
-
-## Running the pipeline
-
-### End-to-end (recommended)
-
-The first argument must point to **your own successful 4D-HOI reconstruction
-output** inside the current checkout or container. Replace
-`<your_results_dir>` with the value passed to reconstruction's `--results_dir`,
-which defaults to `results`. The default SMPL-X reconstruction config writes
-validated results to `generation/4dhoi_recon_smplx_valid/`. This directory
-must contain at least one nested `hoi_data/hoi_data.pkl`; the second argument
-only chooses the new folder name under `data/motion_lib/`. Use the validated
-root to process every dataset, or append a dataset subdirectory to process only
-that dataset.
+Retarget one trusted reconstruction output:
 
 ```bash
+python -m grail.retargeting.soma \
+    <path/to/hoi_data.pkl> \
+    <new_output_directory> \
+    --model-config configs/retargeting/soma_g1.json
+```
+
+For the default reconstruction, inputs live below
+`<results_dir>/generation/4dhoi_recon_soma03_valid/`. Never feed an SMPL-X
+cache to this command; the exporter validates the native SOMA identity and
+runtime bindings before invoking the official retargeter.
+
+The output contains:
+
+- `soma_export/source.bvh` — native SOMA hierarchy, pose, per-joint
+  translations, and source frame rate.
+- `soma_export/native_source.npz` and `native_rest.npz` — canonical source and
+  identity-preserving rest transforms.
+- `g1_dex3_target/` — source-bound SOMA registry containing the original
+  G1+DEx3 MJCF, original joint limits, and wrist-relative hand-task calibration.
+- `g1_retarget/csv/*.csv` — 50-column result: frame, six root channels, 29 G1
+  body/wrist joints, and 14 DEx3 finger joints.
+- JSON manifests with source/model/runtime hashes and FK round-trip errors.
+
+Existing output directories are refused, and the result is marked
+`RETARGETED_UNREVIEWED`. Replay and validate it before policy training or
+hardware use. The wrapper rejects padded or relabeled 29-DoF files: the default
+target must expose the native 43 hinges and 50 generalized coordinates.
+
+SOMA thumb, index, and middle segments are mapped anatomically to the three
+DEx3 digits on each hand. Human ring/pinky motion is not represented by
+independent DEx3 joints. This is a source-guided IK initialization, not a
+contact-aware grasp acceptance test.
+
+The retargeter may apply its configured kinematic foot-plant stabilization.
+This is separate from GRAIL reconstruction contact: the original
+`contact_labels`, object contacts, and contact loss are neither regenerated nor
+replaced by this wrapper.
+
+The G1 CSV is the audited kinematic retarget result, not the legacy SONIC
+`robot/`, `objects/`, `object_usd/`, `meta/` motion-library layout. Do not point
+tracking training directly at the CSV; simulation replay and motion-library
+packaging are separate validation steps.
+
+## Replay robot, object, and table
+
+Use the source-bound target from the same retarget run and the exact validated
+`hoi_data.pkl`. The replay loads the 43-joint robot, object mesh, per-frame
+`obj_R`/`obj_t`, and stored `obj_scale`. It creates a `2.0 x 0.6 x 0.04 m`
+tabletop with four legs directly below the initial object mesh:
+
+```bash
+export DISPLAY=:1
+RETARGET_DIR=<new_output_directory>
+
+imports/soma-retargeter/.venv/bin/python -m grail.retargeting.soma_replay \
+    "$RETARGET_DIR/g1_retarget/csv/source.csv" \
+    <path/to/hoi_data.pkl> \
+    "$RETARGET_DIR/g1_dex3_target" \
+    "$RETARGET_DIR/g1_dex3_scene.mp4"
+```
+
+The table height uses the minimum world-space vertex after applying the initial
+object rotation and scale. Override the tabletop dimensions with
+`--table-size WIDTH DEPTH THICKNESS`; replay does not depend on
+`scene_data.table`.
+
+This is a kinematic alignment replay; it does not run physics or collision
+response. Object material textures are omitted, but the original mesh geometry,
+scale, and trajectory are used. Review contact, penetration, temporal alignment,
+and grasp geometry before accepting the motion.
+
+For a deliberate body-only diagnostic, pass `--target unitree_g1`. That fallback
+emits 29 body/wrist joints and no actuated fingers; it is not the public default
+for manipulation.
+
+## Legacy SMPL-X / GMR path
+
+Use this only for outputs reconstructed with `manip_smplx.yaml` or
+`loco_smplx.yaml`.
+
+```bash
+bash scripts/setup/install_env_sonic.sh
 conda activate sonic
-export DISPLAY=:1                    # GMR uses mujoco viewer, needs a display
 
 RECON_DIR="<your_results_dir>/generation/4dhoi_recon_smplx_valid"
 OUTPUT_FOLDER="<your_output_folder>"
 
-# This must print at least one file before retargeting.
-find "$RECON_DIR" -type f -path '*/hoi_data/hoi_data.pkl' -print -quit
-
 bash grail/retargeting/scripts/retarget_pipeline.sh \
-    "$RECON_DIR" \
-    "$OUTPUT_FOLDER"
+    "$RECON_DIR" "$OUTPUT_FOLDER"
 ```
 
-If the `find` command prints nothing, correct `RECON_DIR` or verify that the
-reconstruction stage produced valid results before continuing.
+This writes `data/motion_lib/<your_output_folder>/` with `robot/`, `objects/`,
+`object_usd/`, and `meta/`, plus the manipulation post-processed
+`<your_output_folder>_ha/` twin and BPS encodings where applicable.
 
-Outputs under `data/motion_lib/<your_output_folder>/`:
-
-| Directory  | Contents                                          |
-|------------|---------------------------------------------------|
-| `robot/`   | G1 joint trajectories (one pkl per motion)        |
-| `objects/` | Object 6-DOF trajectories                         |
-| `object_usd/` | IsaacLab-ready USD assets                      |
-| `meta/`    | Scene metadata (table pose, object name, …)       |
-
-Plus a preprocessed twin at `data/motion_lib/<your_output_folder>_ha/`:
-
-| Directory  | Contents                                                      |
-|------------|---------------------------------------------------------------|
-| `robot/`   | Robot motions with hand-action + table pose                   |
-| `objects/` | Object motions, contact points filtered to ≥ lift frame       |
-| `meta/`    | Per-motion meta (table pose/quat/size, object name)           |
-
-And a BPS encoding at `data/motion_lib/<your_output_folder>/bps/` (multi-object
-datasets only).
-
-### Individual stages
-
-Each stage is a plain Python CLI and can run in isolation.
+For terrain and sitting, skip hand-action processing and zero wrist motion:
 
 ```bash
-RECON_DIR="<your_results_dir>/generation/4dhoi_recon_smplx_valid"
-OUTPUT_BASE="data/motion_lib/<your_output_folder>"
-
-# Stage 1 — retarget SMPL-X → G1
-python -m grail.retargeting.retarget \
-    --data_dir "$RECON_DIR" \
-    --all --robot unitree_g1 --no_viewer \
-    --output_dir "$OUTPUT_BASE"
-
-# Stage 2 — hand-action + table-geometry processing
-python -m grail.retargeting.process \
-    --input  "$OUTPUT_BASE" \
-    --output "${OUTPUT_BASE}_ha" \
-    --meta_pkl data/g1_smplx/g1_skeleton_meta.pkl \
-    --include_contact_points --grasp_from_lift \
-    --lift_threshold 0.02 --grasp_anticipation_frames 10 \
-    --skip_no_lift --per_object
-
-# Add --treat_hands_equally to preserve both arms and derive left/right
-# hand actions symmetrically from each hand's contacts.
-
-# Stage 3 — BPS shape encoding (multi-object datasets only)
-python -m grail.retargeting.compute_bps \
-    --object_usd_dir "$OUTPUT_BASE/object_usd" \
-    --output_dir     "$OUTPUT_BASE/bps"
-```
-
-The shell wrappers under
-{src}`grail/retargeting/scripts/`
-(`retarget.sh`, `process.sh`, `compute_bps.sh`) are thin convenience layers on
-top of these CLIs — read them if you want to know the exact defaults.
-
-(terrain-sitting-data)=
-### Terrain / sitting data
-
-Terrain (curbs, slopes, stairs) and sitting data involve whole-body interaction
-with large environmental objects, not hand-held manipulation. Use
-`--zero_out_wrist` to skip hand IK:
-
-```bash
-TERRAIN_RECON_DIR="<your_results_dir>/generation/4dhoi_recon_smplx_valid"
-TERRAIN_OUTPUT_FOLDER="<your_terrain_output_folder>"
-
 bash grail/retargeting/scripts/retarget.sh \
-    "$TERRAIN_RECON_DIR" \
-    "$TERRAIN_OUTPUT_FOLDER" \
+    "<your_results_dir>/generation/4dhoi_recon_smplx_valid" \
+    "<your_terrain_output_folder>" \
     --zero_out_wrist
 ```
 
-Then skip the `process.sh` step — terrain data does not need hand-action
-preprocessing.
-
-## How the pipeline works
-
-1. **GMR (General Motion Retargeting)** — SMPL-X body model → Unitree G1 MJCF
-   via inverse kinematics. The retarget engine is the public
-   [YanjieZe/GMR](https://github.com/YanjieZe/GMR) submodule; GRAIL-specific
-   compatibility behavior is applied at runtime by
-   {blob}`grail.adapters.gmr <grail/adapters/gmr.py>`.
-2. **Object mesh → USD** — `convert_mesh.py` runs IsaacLab's `MeshConverter`
-   headlessly to produce simulation-ready USD assets with convex-hull collision.
-3. **Hand-action + table geometry** — `process.py` derives hand open/close
-   commands from object lift/contact timing and applies table geometry fixes.
-   By default, the legacy right-hand pickup path zeroes the left arm and keeps
-   `hand_action_left` open. Use `--treat_hands_equally` to preserve both arms
-   and derive each hand action from that hand's contact timing.
-4. **BPS encoding** — `compute_bps.py` samples surface points from each object
-   USD and projects them onto a fixed basis-point set, producing a 10-D object
-   shape embedding used as a policy observation in
-   {blob}`pnp_table <imports/SONIC/gear_sonic/config/exp/manager/universal_token/hoi/pnp_table.yaml>`.
+The G1 metadata, baked SMPL-X shape, and GMR mapping are under
+`data/body_profiles/unitree_g1/smplx/`. The legacy entry points load that
+canonical directory directly.
 
 ## Troubleshooting
 
-| Symptom                                          | Likely cause / fix                                                                                    |
-|--------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| `ModuleNotFoundError: general_motion_retargeting` | Rerun `bash scripts/setup/install_env_sonic.sh` — it installs GMR editable in the active env.         |
-| `ModuleNotFoundError: pxr`                        | `pip install usd-core` (standalone PXR; Isaac Sim-vendored `pxr` is only importable inside kit apps). |
-| Black mujoco viewer / `glfwInit failed`           | `export DISPLAY=:1` **before** activating conda (it is an env var, not a conda setting).              |
-| `FileNotFoundError: .../robot` during processing  | Retargeting found no inputs. Update the first pipeline argument to your reconstruction directory and confirm `find "$RECON_DIR" -type f -path '*/hoi_data/hoi_data.pkl'` returns files. |
-| Retarget skips motions as "no lift"              | `process.py` rejects motions where the object never rises 2 cm. Override with `--lift_threshold 0.01`. |
-| `imports/GMR` is empty                            | Run `git submodule update --init imports/GMR`, then rerun the installer for a source installation.   |
+```{list-table}
+:widths: 36 64
+:header-rows: 1
+
+* - Symptom
+  - Fix
+* - SOMA Retargeter Python is missing
+  - Rerun `bash scripts/setup/install_soma_retargeter.sh`.
+* - Native identity differs from the model config
+  - Use the exact identity/config that produced the reconstruction; the exporter refuses a silent shape replacement.
+* - SOMA hierarchy or FK round-trip check fails
+  - Update all pinned submodules together and use a new output directory; do not bypass the check.
+* - `ModuleNotFoundError: general_motion_retargeting`
+  - This is the legacy SMPL-X path; rerun `bash scripts/setup/install_env_sonic.sh`.
+```

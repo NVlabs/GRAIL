@@ -13,7 +13,7 @@ OUTPUT_FOLDER="${1:?output folder name under data/motion_lib/}"
 shift
 INPUT_DIR="data/motion_lib/${OUTPUT_FOLDER}"
 OUTPUT_DIR="data/motion_lib/${OUTPUT_FOLDER}_ha"
-META_PKL="data/g1_smplx/g1_skeleton_meta.pkl"
+META_PKL="data/body_profiles/unitree_g1/smplx/g1_skeleton_meta.pkl"
 GRASP_ANTICIPATION_FRAMES="${GRAIL_GRASP_ANTICIPATION_FRAMES:-10}"
 
 eval "$(conda shell.bash hook)"

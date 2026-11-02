@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+from grail.core.depth_config import DEPTH_CACHE_SUBDIR
+
 # ============================================================================
 # 4D Reconstruction Paths
 # ============================================================================
@@ -30,11 +32,7 @@ def masks_cache(results_dir: str, recon_cache_dir: str, video_id: str) -> str:
 
 
 def depth_cache(results_dir: str, recon_cache_dir: str, video_id: str) -> str:
-    return os.path.join(results_dir, recon_cache_dir, "depth", f"{video_id}.pt")
-
-
-def contact_labels_cache(results_dir: str, recon_cache_dir: str, video_id: str) -> str:
-    return os.path.join(results_dir, recon_cache_dir, "contact_labels", f"{video_id}.json")
+    return os.path.join(results_dir, recon_cache_dir, DEPTH_CACHE_SUBDIR, f"{video_id}.pt")
 
 
 def foundation_pose_input(results_dir: str, fp_dir: str, video_id: str) -> str:

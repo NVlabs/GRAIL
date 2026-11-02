@@ -14,6 +14,7 @@ from pytorch3d.transforms import (
 
 from grail.constants.image import FOCAL_LENGTH, HEIGHT, WIDTH
 from grail.core.contact_label import detect_contact_joints_interval
+from grail.core.depth_config import DEPTH_CACHE_SUBDIR
 from grail.core.io import (
     load_character_data,
     load_human_motion_data,
@@ -255,6 +256,19 @@ class HOIOptimizer:
         video_fps, video_frame_count = get_video_fps_and_frame_count(video_file)
 
         images_path = sorted(glob(os.path.join(frame_cache_dir, "*.jpg")))
+        if not images_path:
+            extracted = extract_frames_from_video(video_file, frame_cache_dir)
+            if extracted != video_frame_count:
+                raise RuntimeError(
+                    f"Frame extraction mismatch - Video: {video_frame_count}, "
+                    f"Extracted: {extracted}"
+                )
+            images_path = sorted(glob(os.path.join(frame_cache_dir, "*.jpg")))
+        if len(images_path) != video_frame_count:
+            raise RuntimeError(
+                f"Incomplete frame cache - Video: {video_frame_count}, "
+                f"Cached: {len(images_path)} at {frame_cache_dir}"
+            )
         return images_path, video_fps, video_frame_count
 
     def _load_masks(self, video_id):
@@ -343,9 +357,7 @@ class HOIOptimizer:
 
         # Load GT shape params (from pre-fitted files)
         gt_shape_params = self.human_model.load_shape_params(
-            self.cfg,
-            self.character_name,
-            self.device
+            self.cfg, self.character_name, self.device
         )
 
         use_global = self.cfg.get("use_global", False)
@@ -457,7 +469,7 @@ class HOIOptimizer:
 
     def _load_depth(self, video_id):
         """Load preprocessed depth maps from cache."""
-        depth_cache_file = os.path.join(self.cache_dir, "depth", f"{video_id}.pt")
+        depth_cache_file = os.path.join(self.cache_dir, DEPTH_CACHE_SUBDIR, f"{video_id}.pt")
         if not os.path.exists(depth_cache_file):
             raise FileNotFoundError(
                 f"Depth cache not found: {depth_cache_file}. Run preprocessing (step1) first."

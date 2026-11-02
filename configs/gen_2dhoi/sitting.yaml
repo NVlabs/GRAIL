@@ -1,6 +1,8 @@
-character: kid
-character_dir: data/characters
-texture_dir: data/characters
+character: unitree_g1_dhgen_00008
+character_usd: data/body_profiles/unitree_g1/characters/dhgen_00008/c416aab4-cf3f-11f1-bd53-1929f989c6a9.usd
+character_scale: [0.01, 0.01, 0.01]
+character_dir: data/body_profiles/unitree_g1/characters
+texture_dir: data/body_profiles/unitree_g1/characters
 results_dir: results_collection/sitting001
 object_config: configs/objects/chair_sitting.yaml
 verbose: false
@@ -50,4 +52,4 @@ video:
   use_all_tail_images: false
   video_max_retries: 100
   video_retry_wait: 30
-scene_config: configs/scenes/default.yaml
+scene_config: configs/scenes/default.yaml
