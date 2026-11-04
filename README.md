@@ -2,7 +2,7 @@
 
 # GRAIL: Generating Humanoid Loco-Manipulation from World Models
 
-<p><strong>CoRL 2026</strong> <em>(Oral Presentation)</em></p>
+<p><strong>CoRL 2026 · Best Paper Award Finalist</strong></p>
 
 <p>
   <a href="https://research.nvidia.com/labs/dair/grail/">
