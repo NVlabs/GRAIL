@@ -149,7 +149,7 @@ Full documentation can be found at [docs](https://nvlabs.github.io/GRAIL/)
 
 - [x] Release task-general tracking policy checkpoints
 - [ ] Provide quick-start demo script
-- [ ] Release GRAIL manipulation dataset
+- [x] Release GRAIL manipulation dataset
 
 ## Citation
 
