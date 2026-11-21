@@ -1,0 +1,6 @@
+# Standard action composition
+
+defaults:
+  - terms/joint_pos@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.actions.ActionsCfg

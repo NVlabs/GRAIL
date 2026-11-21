@@ -19,6 +19,8 @@
   </a>
 </p>
 
+
+
 <img src="assets/videos/teaser.gif" alt="GRAIL teaser" width="100%"/>
 
 </div>
@@ -27,6 +29,7 @@
 
 ## News
 
+- **[2026-11-20]** 🧩 **Agentic reconstruction and retargeting with SOMA body support** — released the agentic 4D HOI reconstruction and Unitree G1 retargeting workflow on the SOMA body model.
 - **[2026-08-25]** 🎬 **MiniMax-H3 video generation** — added an optional local MiniMax-H3/Sol-Engine backend for the 2D-HOI pipeline. See the [2D-HOI generation guide](https://nvlabs.github.io/GRAIL/gen_2dhoi.html#minimax-h3-provider).
 - **[2026-07-15]** 🤖 **Task-general tracking checkpoints** — released policy checkpoints trained on the released GRAIL data. See the [tracking guide](https://nvlabs.github.io/GRAIL/tracking.html#tracking-released-data) and [dataset page](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL).
 - **[2026-06-03]** 🎉 **Code release** — released the GRAIL codebase and documentation.
@@ -61,70 +64,108 @@
 
 ## Quick Start
 
-**Choose a Docker image** and install local extras inside the bind-mounted checkout:
+### 1. Get the Docker image and open a GPU shell
 
-| Image | Use it for |
-| --- | --- |
-| `docker.io/nvgrail/grail:1.2.0` (`:latest`) | Standard GRAIL with native SOMA 0.3 and Kling; no MiniMax-H3/SGLang runtime |
-| `docker.io/nvgrail/grail:1.2.0-minimax-h3` (`:minimax-h3`) | Standard GRAIL plus an isolated MiniMax-H3/SGLang runtime |
+Start in the GRAIL repository root on a Linux GPU host with NVIDIA-enabled Docker. The examples require the Git LFS assets and the reconstruction and retargeting submodules. See the [installation guide](docs/source/installation.md) for dependency setup and the available runtime environments.
 
-Both Linux AMD64 images contain runtime environments only. They do not contain
-the GRAIL/Sana source, GRAIL or MiniMax-H3 checkpoints, API keys, or user data.
-The repo setup installs the isolated GEM-X, MoGe-3, MoSE3, and Python 3.12 SOMA
-Retargeter runtimes and validates native SOMA 0.3 support in the GRAIL env.
-Keep credentials outside the image and provide them only at runtime.
+The two examples already include their input videos. Use the standard image for these examples or for generation with Kling. To generate new videos locally with MiniMax-H3, use `nvgrail/grail:1.2.0-minimax-h3`, which also supports Kling. The [MiniMax-H3 guide](docs/source/gen_2dhoi.md#minimax-h3-provider) shows the GPU requirements and checkpoint mount.
 
 ```bash
-git clone https://github.com/NVlabs/GRAIL.git
-cd GRAIL
 git submodule update --init --recursive
-
-# The public Docker Hub images can be pulled without registry credentials.
-export GRAIL_IMAGE=docker.io/nvgrail/grail:1.2.0
+git lfs pull --include="examples/g1-2dhoi/*/generation/**"
+GRAIL_IMAGE=nvgrail/grail:1.2.0
 docker pull "$GRAIL_IMAGE"
-
-docker run --gpus all -it --shm-size=16g \
-    -v "$PWD":/workspace/grail \
-    "$GRAIL_IMAGE"
-
-# inside the container
-cd /workspace/grail
-bash scripts/setup/install_env_docker.sh   # validates native extensions, downloads Blender
-bash scripts/setup/download_checkpoints.sh # GEM-X / MoSE3 / FoundationPose and legacy weights
-bash scripts/setup/download_comasset.sh --category cordless_drill # quick-start object
-eval "$(conda shell.bash hook)"
-conda activate grail
-[ -f .env ] && source .env                  # OPENAI_API_KEY, KLING_*, HF_TOKEN
+mkdir -p "$HOME/grail-runs"
+docker run --rm -it --gpus all --shm-size=16g --name grail \
+  -v "$PWD:/workspace/grail" -w /workspace/grail \
+  -v "$HOME/grail-runs:/workspace/runs" \
+  -v grail-model-cache:/root/.cache/grail \
+  -v grail-hf-cache:/root/.cache/huggingface \
+  "$GRAIL_IMAGE"
 ```
 
-The setup script rebuilds GPU/Python-specific native extensions when needed
-(`nvdiffrast`, FoundationPose `mycpp`) and installs Blender into the mounted
-checkout.
-
-Run any stage end-to-end. Pipeline stages are package entrypoints; invoke them
-with `python -m grail.pipelines.*` rather than project-root wrapper scripts.
+Inside the container, install GRAIL and its isolated reconstruction workers, then download the weights. The first setup provisions the workers in the mounted checkout and cache.
 
 ```bash
-# 3D asset generation (procedural terrain or AI-generated objects)
-python -m grail.pipelines.gen_terrain --type stairs --num 50 --output_dir data/syn_stairs
-conda run -n hunyuan python -m grail.pipelines.gen_3d_assets \
-    -i configs/gen_3d/example_objects.yaml -o data/gen_example
-
-# 2D HOI generation (bundled G1 DHGen character + Kling video)
-python -m grail.pipelines.gen_2dhoi --dataset ComAsset --category cordless_drill \
-    --results_dir results --video_model_api kling-ai
-
-# 4D HOI reconstruction (default: native SOMA + hybrid object tracking)
-python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill --results_dir results
-
-# Native SOMA -> Unitree G1 + DEx3 (the output directory must not already exist)
-HOI_DATA=$(find results/generation/4dhoi_recon_soma03_valid/ComAsset/cordless_drill \
-    -type f -path '*/hoi_data/hoi_data.pkl' -print -quit)
-python -m grail.retargeting.soma "$HOI_DATA" results/retargeted/cordless_drill_g1_dex3 \
-    --model-config configs/retargeting/soma_g1.json
+bash scripts/setup/install_env_docker.sh
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate grail
+bash scripts/setup/download_checkpoints.sh --skip-hunyuan3d --skip-sonic --skip-sonic-manip
 ```
 
-Full install, dataset, and config notes: see [Documentation](#documentation) below.
+For the robot stage, make the SOMA Retargeter checkout, robot Python and G1 assets available inside the container. See the [retargeting setup](docs/source/installation.md#soma-retargeter-unitree-g1--dex3).
+
+### 2. Reconstruct the human motion
+
+Keep the `grail` container running. Run the reconstruction and retargeting commands from the repository root in a second host terminal where Codex can run `docker exec grail`. Sign in to Codex on the host. If the CLI rejects its default model, add `-m <model>` after `codex exec` with a model available to your account. If sandbox restrictions prevent access to Docker, add `--approve-for-me` on CLI versions that list it in `codex exec --help`. This lets Codex request automatic review for the Docker commands.
+
+```bash
+CASE=stairs  # or kettlebell
+codex exec "Inside the grail container, use the grail-agentic-hoi-recon workflow on examples/g1-2dhoi/$CASE/generation.
+Copy the inputs to /workspace/runs/$CASE/generation, reconstruct from the video, and save the reviewed fit and reconstruction.mp4 (source and fit side by side) under /workspace/runs/$CASE. For kettlebell, also save the reviewed source contact map there as contact_map.json."
+```
+
+### 3. Retarget the motion to Unitree G1
+
+```bash
+codex exec "Inside the grail container, use the grail-agentic-retargeting workflow on the reviewed fit in /workspace/runs/$CASE.
+Use body-only Unitree G1 for stairs and G1 with DEx3 hands for kettlebell. Save the selected native motion as robot.npz, with its original object mesh binding, and save retargeting.mp4 in the same directory."
+```
+
+On the host, open `~/grail-runs/<case>/reconstruction.mp4` for the human fit and `~/grail-runs/<case>/retargeting.mp4` for the robot motion.
+
+### 4. Track the retargeted motion
+
+Run the following in the GPU container from the GRAIL repository root. Set up the SONIC environment and fetch its tracking checkpoints once. The downloader installs the published `*_warmstart` bundles at the local paths used below. Then run the block for the case you retargeted. Both examples finetune on one GPU with 2,048 simulated environments for 5,000 PPO updates. They evaluate the example motion at the checkpoints saved every 1,000 updates.
+
+```bash
+cd /workspace/grail
+bash scripts/setup/install_env_sonic.sh
+conda activate sonic
+bash scripts/setup/download_checkpoints.sh --skip-gem-x --skip-mose3 --skip-foundationpose --skip-hunyuan3d
+export PYTHONPATH="$PWD/imports/SONIC:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export OMNI_KIT_ACCEPT_EULA=Yes WANDB_MODE=disabled
+```
+
+**Stairs — terrain tracking.** Package the body-only G1 motion with the stair collider, then finetune the released terrain policy on it. Use a fresh output directory for each run.
+
+```bash
+STAIRS=/workspace/runs/stairs
+LIB="$STAIRS/terrain"
+OUT="$STAIRS/tracking"
+python -m grail.retargeting.terrain --native "$STAIRS/robot.npz" --motion-key stairs --output "$LIB" && (
+  set -e
+  cd imports/SONIC
+  python gear_sonic/train_agent_trl.py +exp=manager/universal_token/scene/terrain_tracking \
+    num_envs=2048 headless=true ++warm_resume=true ++use_wandb=false \
+    "++checkpoint=$PWD/models/terrain_stairs/last.pt" "++experiment_dir=$OUT/train" \
+    ++algo.config.num_learning_iterations=5000 ++callbacks.model_save.save_frequency=1000 \
+    ++callbacks.model_save.save_last_frequency=20 \
+    "++manager_env.commands.motion.motion_lib_cfg.motion_file=$LIB/robot" \
+    "++manager_env.commands.motion.motion_lib_cfg.object_motion_file=$LIB/objects" \
+    "++manager_env.config.terrain_motion_dir=$LIB" "++manager_env.config.flat_usd_path=$LIB/flat_placeholder.usd"
+
+  for step in 001000 002000 003000 004000 005000; do
+    python gear_sonic/eval_agent_trl.py "++checkpoint=$OUT/train/model_step_${step}.pt" \
+      ++num_envs=1 ++headless=true '++eval_callbacks=[im_eval]' ++run_eval_loop=false \
+      ++use_wandb=false "++eval_output_dir=$OUT/eval/step_${step}"
+  done
+)
+```
+
+After training, the loop evaluates all five checkpoints. On the host, open `~/grail-runs/stairs/tracking/eval/step_005000/metrics_eval.json` for final tracking errors and termination details, or compare the earlier step directories.
+
+**Kettlebell — manipulation tracking.** Supply the G1+DEx3 motion and the contact map reviewed during reconstruction. The launcher packs the handoff, finetunes ContactFirst, saves a checkpoint every 1,000 updates, and evaluates each checkpoint after training releases the GPU. The setup command above downloads the actor warmstart and decoder into `imports/SONIC/models/`.
+
+```bash
+KETTLE=/workspace/runs/kettlebell
+python -m grail.retargeting.manipulation.handoff --native "$KETTLE/robot.npz" \
+  --contact-map "$KETTLE/contact_map.json" --support native --motion-key kettlebell --output "$KETTLE/handoff" &&
+NUM_ENVS=2048 ITERATIONS=5000 EVAL_EVERY=1000 bash scripts/tracking/manipulation_finetune.sh \
+  "$KETTLE/tracking" "$KETTLE/handoff"
+```
+
+On the host, open `~/grail-runs/kettlebell/tracking/eval_final/kettlebell/summary.json` for reference coverage and the termination reason, or `output/eval.mp4` in that directory for the rollout. Earlier evaluations are under `tracking/eval/step_*/kettlebell/`. To evaluate without rendering the rollout video, add `EVAL_NO_VIDEO=1` before `NUM_ENVS` in the finetune command. Each checkpoint still produces a rollout summary.
 
 ## Documentation
 

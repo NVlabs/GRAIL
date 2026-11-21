@@ -1,0 +1,7 @@
+tracking_relative_body_pos:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:tracking_relative_body_pos_error
+  weight: 1.0
+  params:
+    command_name: "motion"
+    std: 0.3

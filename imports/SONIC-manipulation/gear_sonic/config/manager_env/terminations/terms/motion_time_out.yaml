@@ -1,0 +1,6 @@
+time_out:
+  _target_: isaaclab.managers.TerminationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:tracking_time_out
+  time_out: true
+  params:
+    command_name: "motion"

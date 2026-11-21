@@ -14,7 +14,7 @@ this SR is over the FULL motion library — the ground truth "real" SR.
 Usage:
     # Summarize all step_* dirs under an experiment
     python -m grail.data_export.summarize_phase1_sr \\
-        --exp_dir logs_rl/TRL_G1_Track/manager/universal_token/all_modes/MY_EXP
+        --exp_dir runs/example
 
     # Limit to specific steps
     python -m grail.data_export.summarize_phase1_sr \\
@@ -22,8 +22,8 @@ Usage:
 
     # Write JSON + compare against a top-K JSON from select_top_checkpoints.py
     python -m grail.data_export.summarize_phase1_sr \\
-        --exp_dir ... --compare out/grail-data-export/tnf_top5.json \\
-        --out out/grail-data-export/tnf_top5_real_sr.json
+        --exp_dir ... --compare out/grail-data-export/top_checkpoints.json \\
+        --out out/grail-data-export/top_checkpoints_real_sr.json
 """
 
 import argparse

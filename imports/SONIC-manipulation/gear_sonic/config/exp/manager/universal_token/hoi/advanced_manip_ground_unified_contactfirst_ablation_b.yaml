@@ -1,0 +1,34 @@
+# @package _global_
+# RP2 contact ablation arm B: arm A plus HiPHI-style reference-contact hand
+# terms. The contact-first tracking factor from the baseline is kept.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_a
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_b
+
+manager_env:
+  rewards:
+    # Per-hand ordinary reward policy: inherited from the base yaml (required 20 x grasp / neutral 2 x grasp /
+    # known no-contact 2 x openness, mutually exclusive). The former 10/10 binary-gated grasp terms and the
+    # -2 open-hand-unless-reference-contact penalties are superseded (they would double count and penalize
+    # neutral frames); they stay disabled here for every inheritor (ablation_c/d, LoRA, noise-only).
+    open_hand_unless_reference_contact_right: null
+    open_hand_unless_reference_contact_left: null
+    # Fingertips toward the source contact center, on reference-contact frames.
+    grasp_contact_center_right:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_grasp_contact_center
+      weight: 0.5
+      params:
+        hand: right_hand
+        command_name: motion
+        exp_coeff: -10.0
+    grasp_contact_center_left:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_grasp_contact_center
+      weight: 0.5
+      params:
+        hand: left_hand
+        command_name: motion
+        exp_coeff: -10.0

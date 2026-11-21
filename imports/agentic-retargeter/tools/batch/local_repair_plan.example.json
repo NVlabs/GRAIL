@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "case_a",
+      "cwd": "/path/to/agentic-retargeter",
+      "stages": [
+        {
+          "name": "baseline",
+          "category": "audit",
+          "inputs": [
+            "/cases/case_a/repair.json",
+            "/cases/case_a/model",
+            "/cases/case_a/parent.npz",
+            "/cases/case_a/object_mesh.npz",
+            "/cases/case_a/runtime.json"
+          ],
+          "outputs": [
+            "{stage_output}/audit/report.json"
+          ],
+          "argv": [
+            "/root/miniconda3/envs/sonic/bin/python",
+            "/path/to/agentic-retargeter/tools/repair/run.py",
+            "audit",
+            "--config",
+            "/cases/case_a/repair.json",
+            "--cache",
+            "/cache/audit",
+            "--diagnostic",
+            "--output",
+            "{stage_output}/audit"
+          ]
+        },
+        {
+          "name": "repair",
+          "category": "solver",
+          "inputs": [
+            "/cases/case_a/repair.json",
+            "/cases/case_a/model",
+            "/cases/case_a/parent.npz",
+            "/cases/case_a/object_mesh.npz",
+            "/cases/case_a/runtime.json"
+          ],
+          "outputs": [
+            "{stage_output}/repair/candidate_UNREVIEWED.npz",
+            "{stage_output}/repair/report.json"
+          ],
+          "argv": [
+            "/root/miniconda3/envs/sonic/bin/python",
+            "/path/to/agentic-retargeter/tools/repair/run.py",
+            "repair",
+            "--config",
+            "/cases/case_a/repair.json",
+            "--cache",
+            "/cache/audit",
+            "--output",
+            "{stage_output}/repair"
+          ],
+          "gate": {
+            "path": "{stage_output}/repair/report.json",
+            "field": "audit_after.passed",
+            "equals": true
+          }
+        },
+        {
+          "name": "candidate_audit",
+          "category": "audit",
+          "inputs": [
+            "/cases/case_a/repair.json",
+            "/cases/case_a/model",
+            "/cases/case_a/parent.npz",
+            "/cases/case_a/object_mesh.npz",
+            "/cases/case_a/runtime.json",
+            "{stage:repair}/repair/candidate_UNREVIEWED.npz"
+          ],
+          "outputs": [
+            "{stage_output}/audit/report.json"
+          ],
+          "argv": [
+            "/root/miniconda3/envs/sonic/bin/python",
+            "/path/to/agentic-retargeter/tools/repair/run.py",
+            "audit",
+            "--config",
+            "/cases/case_a/repair.json",
+            "--cache",
+            "/cache/audit",
+            "--candidate",
+            "{stage:repair}/repair/candidate_UNREVIEWED.npz",
+            "--output",
+            "{stage_output}/audit"
+          ],
+          "gate": {
+            "path": "{stage_output}/audit/report.json",
+            "field": "passed",
+            "equals": true
+          }
+        },
+        {
+          "name": "render",
+          "category": "render",
+          "inputs": [
+            "/cases/case_a/template.blend",
+            "/cases/case_a/model",
+            "/cases/case_a/runtime.json",
+            "{stage:repair}/repair/candidate_UNREVIEWED.npz"
+          ],
+          "outputs": [
+            "{stage_output}/render"
+          ],
+          "argv": [
+            "/root/miniconda3/envs/sonic/bin/python",
+            "/path/to/agentic-retargeter/tools/render/run.py",
+            "--config",
+            "{stage_output}/render.json",
+            "--output",
+            "{stage_output}/render",
+            "--cache",
+            "/cache/render",
+            "--workers",
+            "1"
+          ],
+          "json_files": {
+            "render.json": {
+              "schema_version": 1,
+              "blender": "/blender/blender",
+              "blend": "/cases/case_a/template.blend",
+              "native": "{stage:repair}/repair/candidate_UNREVIEWED.npz",
+              "frames": [
+                0,
+                1,
+                2
+              ],
+              "views": [
+                {
+                  "name": "full",
+                  "camera": "SourceCamera"
+                }
+              ],
+              "require_hardware": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -20,7 +20,6 @@
   "global_scale_policy": "fixed_identity_parameter",
   "runtime_external_scale": 1.0,
   "usage": "default downstream identity for the public Unitree G1 SOMA reconstruction profile",
-  "render_character": "../characters/dhgen_00008/manifest.json",
   "limitations": [
     "Approximate body identity; not vertexwise equality to the DHGen render asset.",
     "Motion/contact quality and hardware safety require separate validation."

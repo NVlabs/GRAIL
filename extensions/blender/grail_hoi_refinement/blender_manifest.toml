@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "grail_hoi_refinement"
+version = "0.3.0"
+name = "GRAIL HOI Recon Refinement"
+tagline = "Edit and review native SOMA Stage 2 motion"
+maintainer = "GRAIL contributors"
+type = "add-on"
+tags = ["Animation"]
+blender_version_min = "4.2.0"
+blender_version_max = "4.4.0"
+license = ["SPDX:LicenseRef-NVIDIA"]
+
+[permissions]
+files = "Read native models and save new motion candidates"

@@ -1,0 +1,291 @@
+# @package _global_
+#
+# ContactFirst base for the manipulation finetune chain (renamed from the
+# humanoid-object-interaction fork's advanced_manip_ground.yaml at tree
+# unification; the released advanced_manip_ground.yaml is unchanged).
+#
+# Self-contained release config. It spells out the consolidated ground
+# manipulation training behavior directly instead of inheriting a historical
+# experiment config.
+
+defaults:
+  - /algo: ppo_im_phc
+  - /manager_env: base_env
+  - /callbacks/read_eval
+  - override /trainer: trl_ppo_aux
+  - override /actor_critic: hoi_staged_mlp_aux
+  - override /manager_env/observations/policy: hoi_manip/grab_43dof_policy_mf_delta_bps
+  - override /manager_env/observations/critic: hoi_manip/grab_43dof_critic_mf_delta
+  - override /manager_env/observations/policy_atm: proprio_hist
+  - override /manager_env/observations/tokenizer: unitoken_all_noz_heading
+  - override /manager_env/rewards: hoi_manip/grab_rewards_no_lift_ucw_contact_lr_wrist_ori
+  - override /manager_env/events: tracking/no_dr
+  - override /manager_env/terminations: tracking/hoi_grab_no_lift
+  - _self_
+
+use_manager_env: true
+
+exp_base: ${hydra:runtime.choices.exp}
+motion_shard_by_rank: true
+exp_var: advanced_manip_ground
+experiment_name: ${exp_base}_${exp_var}
+experiment_dir: ${base_dir}/${project_name}/${experiment_name}-${timestamp}
+
+num_envs: 4096
+project_name: GRAB_Tracking
+
+actor_prop_history_length: 10
+actor_actions_history_length: 10
+critic_prop_history_length: 10
+critic_actions_history_length: 10
+
+manager_env:
+  config:
+    # Tree-unification gates: restore the fork's defaults for this chain.
+    physx_robot_replication: true
+    log_adaptive_sampling_metrics: false
+    replay_reference_hand_dof_name_map: true
+    safe_nan: true
+    gpu_collision_stack_size_exp: 30
+
+    robot:
+      type: g1_43dof
+
+    terrain_type: plane
+    env_spacing: 10.0
+    eval_camera_offset: [2, -2, 1]
+
+    add_object: true
+    object_is_dynamic: true
+    add_table: false
+    object_mass: null
+    object_density: 300
+    lift_contact_force_threshold: 0.1
+    scene_scale: null
+
+    use_motion_hand_actions: false
+    use_finger_primitive: true
+    motion_meta_info_path: null
+
+    use_latent_residual: true
+    latent_residual_mode: "pre_quantization"
+    latent_residual_scale: 0.1
+    meta_action_dim: 66
+    tokenizer_action_dim: 64
+    hand_action_dim: 2
+
+    finger_primitive:
+      primitive_action_map:
+        left:
+          dof_names:
+            - left_hand_index_0_joint
+            - left_hand_index_1_joint
+            - left_hand_middle_0_joint
+            - left_hand_middle_1_joint
+            - left_hand_thumb_0_joint
+            - left_hand_thumb_1_joint
+            - left_hand_thumb_2_joint
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [-1.42857143, -2.14285714, -1.42857143, -2.14285714, 0.0, 1.0, 1.0]
+          discrete: true
+        right:
+          dof_names:
+            - right_hand_index_0_joint
+            - right_hand_index_1_joint
+            - right_hand_middle_0_joint
+            - right_hand_middle_1_joint
+            - right_hand_thumb_0_joint
+            - right_hand_thumb_1_joint
+            - right_hand_thumb_2_joint
+          pos_0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          pos_1: [1.42857143, 2.14285714, 1.42857143, 2.14285714, 0.0, -1.0, -1.0]
+          discrete: true
+
+    action_transform_module_cfg: models/sonic_sm_3pt_heading_hh-20260203_131215/model_config.yaml
+    action_transform_module_checkpoint: models/sonic_sm_3pt_heading_hh-20260203_131215/model_step_092000.pt
+
+    use_staged_wrapper: false
+
+  commands:
+    motion:
+      sample_before_contact_window_mode: windowed
+      motion_lib_num_dof: 29
+      hand_default_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      num_future_frames: 10
+      dt_future_ref_frames: 0.1
+      smpl_num_future_frames: 10
+      smpl_dt_future_ref_frames: 0.02
+      debug_vis: false
+      use_paired_motions: true
+      start_from_first_frame: false
+      sample_before_contact: true
+      sample_before_contact_margin: 10
+      sample_before_contact_hand: right_hand
+
+      pose_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+
+      velocity_range:
+        x: [0, 0]
+        y: [0, 0]
+        z: [0, 0]
+        roll: [0, 0]
+        pitch: [0, 0]
+        yaw: [0, 0]
+
+      joint_position_range: [0, 0]
+      joint_velocity_range: [0, 0]
+      object_position_randomize: false
+
+      encoder_sample_probs:
+        g1: 1.0
+        teleop: 0.0
+        smpl: 0.0
+
+      motion_lib_cfg:
+        adaptive_sampling: null
+        smpl_motion_file: dummy
+        smpl_y_up: true
+
+  observations:
+    policy:
+      enable_corruption: false
+    tokenizer:
+      enable_corruption: false
+    policy_atm:
+      enable_corruption: false
+
+  rewards:
+    # Object tracking / task objective.
+    # Object tracking (aligned with the historical GRAIL run
+    # grail_native10000_full3072_accept_v3): R = 20 * eligible * (0.5 exp(-10 |dp|) + 0.3 exp(-20 theta)),
+    # exponential kernel on the unsquared position error (m) and quaternion angle (rad); velocity weights 0
+    # (velocities only activate); eligible = actual left contact OR actual right contact OR reference clearly
+    # moving (0.05 m/s / 0.1 rad/s). 0.5 + 0.3 is deliberately not renormalized (max 16 before manager dt).
+    object_tracking_reward:
+      weight: 20
+      params:
+        w_op: 0.5
+        w_or: 0.3
+        w_ov: 0.0
+        w_oav: 0.0
+        pos_exp_coeff: -10.0
+        ori_exp_coeff: -20.0
+        activation: contact_or_refmotion
+        contact_hands: [left_hand, right_hand]
+        left_sensor_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: object_to_left_hand_contact_sensor
+        ref_lin_speed_threshold: 0.05
+        ref_ang_speed_threshold: 0.1
+        object_tracking_version: grail_kernel_contact_or_refmotion_v1
+
+    # Per-hand ordinary reward policy, symmetric and mutually exclusive per hand:
+    #   reference required      -> 20 x measured grasp (weight 20 x coefficient_required 1.0)
+    #   reference neutral/absent -> 2 x measured grasp  (weight 20 x 0.1)
+    #   known no-contact        -> 2 x physical hand openness from the actual finger joints (weight 20 x 0.1)
+    # Measured grasp definition/thresholds unchanged (0.1 N per finger, 3 fingers). No old open-hand penalty.
+    grasp_reward:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_hand_contact_policy
+      weight: 20.0
+      params:
+        sensor_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: object_to_hand_contact_sensor
+        contact_threshold: 0.1
+        min_contacts: 3
+        hand: right_hand
+        command_name: motion
+        coefficient_required: 1.0
+        coefficient_neutral: 0.1
+        coefficient_absent: 0.1
+        coefficient_open: 0.1
+        hand_reward_version: required20_neutral2_open2_v1
+    grasp_reward_left:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:reward_hand_contact_policy
+      weight: 20.0
+      params:
+        sensor_cfg:
+          _target_: isaaclab.managers.SceneEntityCfg
+          name: object_to_left_hand_contact_sensor
+        contact_threshold: 0.1
+        min_contacts: 3
+        hand: left_hand
+        command_name: motion
+        coefficient_required: 1.0
+        coefficient_neutral: 0.1
+        coefficient_absent: 0.1
+        coefficient_open: 0.1
+        hand_reward_version: required20_neutral2_open2_v1
+    grasp_finger_direction:
+      weight: 10.0
+    grasp_finger_direction_left:
+      weight: 5.0
+    grasp_contact_center_left:
+      weight: 0.05
+
+    # Body orientation tracking.
+    tracking_anchor_ori:
+      weight: 2.5
+    tracking_relative_body_ori_weighted:
+      weight: 5.0
+      params:
+        body_weights:
+          left_wrist_yaw_link: 1.0
+          right_wrist_yaw_link: 1.0
+
+    # Termination / safety penalties.
+    hand_table_contact_penalty: null
+
+  terminations:
+    hand_table_contact_termination: null
+    time_out:
+      params:
+        cap_by_episode_length: true
+    object_pos_deviation:
+      params:
+        threshold: 0.25
+    object_z_pos_deviation:
+      _target_: isaaclab.managers.TerminationTermCfg
+      func: gear_sonic.envs.manager_env.mdp:object_z_pos_deviation
+      params:
+        command_name: motion
+        threshold: 0.3
+    grasp_failure_after_contact:
+      _target_: isaaclab.managers.TerminationTermCfg
+      func: gear_sonic.envs.manager_env.mdp:GraspFailureAfterContact
+      params:
+        command_name: motion
+        hand: right_hand
+        sensor_name: object_to_hand_contact_sensor
+        contact_threshold: 0.1
+        min_contacts: 3
+        grace_frames: 50
+
+algo:
+  config:
+    advantage_normalization_reduced_moments: true
+    num_steps_per_env: 24
+    use_clampped_std: true
+    std_clamp_min: 0.001
+    std_clamp_max: 0.5
+    max_grad_norm: 0.1
+    num_learning_iterations: 20000
+    actor:
+      backbone:
+        aux_loss_coef:
+          latent_l2: 0.1
+
+callbacks:
+  model_save:
+    save_frequency: 500
+  im_resample:
+    _target_: gear_sonic.trl.callbacks.im_resample_callback.ImResampleCallback
+    motion_resample_frequency: 250

@@ -1,0 +1,31 @@
+# @package _global_
+
+algo:
+  config:
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: True
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModule
+        process_output_dim: True
+        module_config_dict:
+          input_dim: [actor_obs]
+          output_dim: [robot_action_dim]
+          layer_config:
+            type: MLP
+            hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+            activation: SiLU
+    critic:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Critic
+      running_mean_std: True
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModule
+        process_output_dim: True
+        module_config_dict:
+          type: MLP
+          input_dim: [critic_obs]
+          output_dim: [1]
+          layer_config:
+            type: MLP
+            hidden_dims: [2048, 2048, 1024, 1024, 512, 512]
+            activation: SiLU

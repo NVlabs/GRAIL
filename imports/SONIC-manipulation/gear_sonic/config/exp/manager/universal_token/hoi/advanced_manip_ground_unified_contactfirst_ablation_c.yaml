@@ -1,0 +1,71 @@
+# @package _global_
+# RP2 contact ablation arm C: arm B with active-entity object tracking in place
+# of the single-object term, source relation and articulation joint tracking,
+# and a lighter finger-primitive limit. Requires the derived-label sources in
+# configs/rp2_four_teacher_sources_derived_contact.json.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_b
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_c
+
+manager_env:
+  rewards:
+    object_tracking_reward: null
+    # User default 2026-10-13 (unified with the ordinary term and the historical GRAIL run): total weight 20
+    # (was 2.0), exponential kernel -10 / -20 on unsquared position / angle errors, velocity weights 0,
+    # activation = actual left OR right hand contact OR reference clearly moving (hold-aware reference getters).
+    active_entity_object_tracking:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:object_tracking_reward_multi
+      weight: 20.0
+      params:
+        command_name: motion
+        track_active_entity_base: true
+        mask_name: active_entity_valid
+        w_op: 0.5
+        w_or: 0.3
+        w_ov: 0.0
+        w_oav: 0.0
+        pos_exp_coeff: -10.0
+        ori_exp_coeff: -20.0
+        activation: contact_or_refmotion
+        ref_lin_speed_threshold: 0.05
+        ref_ang_speed_threshold: 0.1
+        object_tracking_version: grail_kernel_contact_or_refmotion_v1
+    # The packs carry center-geometry relations only (no surface SDF and no
+    # source heading channel).
+    rp2_source_relation_tracking:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp.rp2_source_relation:rp2_source_relation_tracking_reward
+      weight: 2.0
+      params:
+        command_name: motion
+        relation_geometry: center
+        express_target_in_current_robot_heading: false
+        reference_distance_weighting: true
+        reference_distance_scale: 0.40
+        reference_distance_floor: 0.15
+    # Rigid targets have no valid joints, so this term is measured as zero.
+    active_articulation_joint_tracking:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:active_articulation_joint_tracking_reward
+      weight: 5.0
+      params:
+        command_name: motion
+        position_weight: 0.8
+        velocity_weight: 0.2
+        position_exp_coeff: -4.0
+        velocity_exp_coeff: -0.25
+    finger_primitive_limit:
+      weight: -1.0
+    contact_first_grasp_factor:
+      params:
+        tracking_terms:
+          - tracking_anchor_pos
+          - tracking_anchor_ori
+          - tracking_relative_body_pos
+          - tracking_relative_body_ori_weighted
+          - tracking_body_linvel
+          - tracking_body_angvel
+          - active_entity_object_tracking

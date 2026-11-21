@@ -349,10 +349,16 @@ import gear_sonic
 import isaaclab
 import isaacsim
 import smpl_sim
-from grail.retargeting.retarget import main
+from importlib.util import find_spec
+from grail.retargeting import terrain
+from grail.retargeting.manipulation import handoff, pack
+
+for module in ("gear_sonic.train_agent_trl", "gear_sonic.eval_contactfirst_trl"):
+    if find_spec(module) is None:
+        raise ImportError(f"Missing tracking module: {module}")
 
 print(f"  GMR: {gmr.__file__}")
-print("  GRAIL retargeting + gear_sonic + smpl_sim: OK")
+print("  GRAIL tracking (terrain pack, manipulation handoff and pack, SONIC train and evaluate) + gear_sonic + smpl_sim: OK")
 print("  Isaac Lab + Isaac Sim: OK")
 print("  Critical package versions verified")
 PY
@@ -363,7 +369,7 @@ fi
 
 echo ""
 echo "Setup complete. Quick start:"
-echo "  bash grail/retargeting/scripts/retarget_pipeline.sh <data_dir> <output_folder>"
+echo "  python -m grail.retargeting.manipulation.handoff --help"
 echo ""
 echo "Full preflight:"
 echo "  OMNI_KIT_ACCEPT_EULA=Yes python imports/SONIC/check_environment.py --training"

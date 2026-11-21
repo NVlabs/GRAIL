@@ -1,0 +1,5 @@
+command:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:generated_commands
+  params:
+    command_name: "motion"

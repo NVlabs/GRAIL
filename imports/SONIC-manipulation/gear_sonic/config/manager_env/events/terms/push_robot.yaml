@@ -1,0 +1,37 @@
+# =============================================================================
+# Velocity Push Event (for balance/robustness training)
+# =============================================================================
+#
+# This event applies VELOCITY IMPULSES to the robot's base, simulating external
+# disturbances like being bumped. It's used for general robustness training.
+#
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ NOTE: This event does NOT affect the compliance mechanism!                 │
+# │                                                                            │
+# │ For compliance training, you ALSO need:                                    │
+# │   - terms/compliance_force_push@_here_                                     │
+# │   - terms/chip_change_compliance_discrete/unified@_here_                   │
+# └────────────────────────────────────────────────────────────────────────────┘
+#
+# =============================================================================
+
+push_robot:
+  _target_: isaaclab.managers.EventTermCfg
+  func: gear_sonic.envs.manager_env.mdp:push_by_setting_velocity
+  mode: "interval"
+  # Random push every 1-3 seconds
+  interval_range_s: [1.0, 3.0]
+  params:
+    velocity_range:
+      # Forward/backward velocity (m/s)
+      x: [-0.5, 0.5]
+      # Left/right velocity (m/s)
+      y: [-0.5, 0.5]
+      # Up/down velocity (m/s)
+      z: [-0.2, 0.2]
+      # Roll angular velocity (rad/s)
+      roll: [-0.52, 0.52]
+      # Pitch angular velocity (rad/s)
+      pitch: [-0.52, 0.52]
+      # Yaw angular velocity (rad/s)
+      yaw: [-0.78, 0.78]

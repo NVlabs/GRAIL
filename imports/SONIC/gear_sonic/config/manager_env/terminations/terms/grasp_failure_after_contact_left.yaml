@@ -1,0 +1,10 @@
+grasp_failure_after_contact_left:
+  _target_: isaaclab.managers.TerminationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:GraspFailureAfterContact
+  params:
+    command_name: motion
+    hand: left_hand
+    sensor_name: object_to_left_hand_contact_sensor
+    contact_threshold: 0.1
+    min_contacts: 3
+    grace_frames: 50

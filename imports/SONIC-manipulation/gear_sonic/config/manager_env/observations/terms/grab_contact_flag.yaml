@@ -1,0 +1,5 @@
+grab_contact_flag:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:grab_contact_flag
+  params:
+    command_name: "motion"

@@ -1,0 +1,6 @@
+encoder_index:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:get_command_obs
+  params:
+    command_name: "motion"
+    obs_name: "episode_encoder_index"

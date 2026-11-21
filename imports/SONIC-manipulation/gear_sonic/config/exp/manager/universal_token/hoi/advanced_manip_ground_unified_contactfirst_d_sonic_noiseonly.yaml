@@ -1,0 +1,11 @@
+# @package _global_
+# Same D + body factor as the LoRA arm; only adapters are disabled/frozen.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_d_sonic_lora
+  - _self_
+exp_var: advanced_manip_ground_unified_contactfirst_d_sonic_noiseonly
+algo:
+  config:
+    actor:
+      sonic_decoder_lora:
+        trainable: false

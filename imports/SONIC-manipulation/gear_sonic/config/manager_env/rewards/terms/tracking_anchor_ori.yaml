@@ -1,0 +1,7 @@
+tracking_anchor_ori:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:tracking_anchor_ori_error
+  weight: 0.5
+  params:
+    command_name: "motion"
+    std: 0.4

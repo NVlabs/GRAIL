@@ -20,6 +20,8 @@
 *.hdf5 filter=lfs diff=lfs merge=lfs -text
 *.parquet filter=lfs diff=lfs merge=lfs -text
 *.obj filter=lfs diff=lfs merge=lfs -text
+/examples/g1-2dhoi/*/generation/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+/examples/g1-2dhoi/*/generation/**/*.pickle -text
 *.dae filter=lfs diff=lfs merge=lfs -text
 *.so filter=lfs diff=lfs merge=lfs -text
 *.so.* filter=lfs diff=lfs merge=lfs -text

@@ -1,48 +1,34 @@
-"""Interaction detection and contact label management.
+"""Geometric object-motion intervals used by reconstruction initialization.
 
-Provides functions to detect when human-object interaction starts/ends
-in a video sequence, using either object pose trajectories or 2D mask tracking.
+Pose trajectories and 2D mask centers provide motion proxies, not hand-contact
+observations. Contact phases and material pairs are reviewed separately before
+Stage 2; these helpers never infer contact from source images.
 """
 
 import cv2
 import numpy as np
 import torch
 
-from grail.core.contact_label import detect_interaction
-
-
-def get_contact_labels_for_frame(frame_idx, contact_labels, contact_start_idx, contact_interval):
-    """Return the contact labels for a specific frame based on its interval.
-
-    Returns None if the frame is before the interaction start or if the contact interval is not set.
-    """
-    if frame_idx < contact_start_idx:
-        return None
-    if not contact_interval:
-        return None
-    interval_idx = (frame_idx - contact_start_idx) // contact_interval
-    if interval_idx >= len(contact_labels):
-        interval_idx = len(contact_labels) - 1
-    labels = contact_labels[interval_idx]
-    if isinstance(labels, str):  # backward compatibility with old caches
-        labels = [labels]
-    return labels
-
 
 def identify_interaction_start_end(
     obj_poses, image_list, obj_name, logger, t_threshold=0.04, interval=8, has_interaction_end=False
 ):
-    """Detect interaction start/end frames from object pose trajectories.
+    """Find an object-motion interval from translation trajectories.
 
-    Uses object translation velocity to detect when the object starts moving.
-    Falls back to LLM-based detection if no motion is found.
+    The historical signature is retained for callers, but source images and
+    object names are not consumed. No detected motion returns ``(T, T, True)``;
+    this sentinel preserves the full stationary interval and is not a valid
+    frame index for native pose alignment. Stationarity does not imply absence
+    of hand contact.
 
     Returns:
-        inter_start_idx: Frame index where interaction starts
-        inter_end_idx: Frame index where interaction ends
-        is_static_obj: Whether the object is static throughout
+        inter_start_idx: First detected object-motion frame, or T
+        inter_end_idx: Exclusive end of the motion interval
+        is_static_obj: Whether the motion heuristic found no moving interval
     """
     T = len(obj_poses)
+    if T == 0:
+        raise ValueError("Object pose sequence must contain at least one frame")
     is_static_obj = True
     inter_start_idx = None
 
@@ -63,16 +49,6 @@ def identify_interaction_start_end(
             break
 
     if inter_start_idx is None:
-        num_keyframe = 8
-        interval = T // num_keyframe
-        for i in range(T - interval, -1, -interval):
-            image_path = image_list[i]
-            is_interacting = detect_interaction(image_path, obj_name)
-            if is_interacting:
-                inter_start_idx = i
-                break
-
-    if inter_start_idx is None:
         inter_start_idx = T
 
     inter_end_idx = T
@@ -89,10 +65,13 @@ def identify_interaction_start_end_with_mask(
     min_static_frames=12,
     has_interaction_end=False,
 ):
-    """Detect interaction start/end frames using 2D object mask center trajectory.
+    """Find an object-motion interval using 2D object mask center trajectories.
 
     For start: finds where the mask center starts to move constantly.
     For end: finds where it stops moving and remains stationary until the end.
+    No detected motion returns ``(T, T, True)``, including short sequences that
+    do not reach the motion-search window. This is a motion proxy, not a contact
+    observation; callers must use a valid frame for native pose alignment.
 
     Args:
         masks: Dictionary of masks with frame_idx as keys, masks[frame_idx][1] is object mask
@@ -108,6 +87,8 @@ def identify_interaction_start_end_with_mask(
         inter_start_idx, inter_end_idx, is_static_obj
     """
     T = len(image_list)
+    if T == 0:
+        raise ValueError("Image sequence must contain at least one frame")
 
     # Compute mask centers for all frames
     mask_centers = []
@@ -166,7 +147,8 @@ def identify_interaction_start_end_with_mask(
                 break
 
     if inter_start_idx is None:
-        raise ValueError("No interaction found")
+        logger.info("No moving mask interval found; retaining the full stationary interval")
+        return T, T, True
 
     # Identify interaction end
     inter_end_idx = T

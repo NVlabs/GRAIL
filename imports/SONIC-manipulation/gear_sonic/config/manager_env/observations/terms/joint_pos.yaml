@@ -1,0 +1,3 @@
+joint_pos:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:joint_pos_rel

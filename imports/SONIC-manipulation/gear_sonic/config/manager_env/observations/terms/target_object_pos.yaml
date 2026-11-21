@@ -1,0 +1,7 @@
+target_object_pos:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:get_target_object_pos_in_base_frame
+  params:
+    asset_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "object"

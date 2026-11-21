@@ -1,0 +1,5 @@
+body_ori:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:robot_body_ori_b
+  params:
+    command_name: "motion"

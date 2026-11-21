@@ -1,0 +1,15 @@
+# Standard critic observations composition
+
+defaults:
+  - ../terms/command@_here_
+  - ../terms/motion_anchor_pos_b@_here_
+  - ../terms/motion_anchor_ori_b@_here_
+  - ../terms/body_pos@_here_
+  - ../terms/body_ori@_here_
+  - ../terms/base_lin_vel@_here_
+  - ../terms/base_ang_vel@_here_
+  - ../terms/joint_pos@_here_
+  - ../terms/joint_vel@_here_
+  - ../terms/actions@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.observations.PrivilegedCfg

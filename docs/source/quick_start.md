@@ -1,5 +1,7 @@
 # Quick Start
 
+To start from an existing video, follow the {blob}`stair and kettlebell Quick Start <README.md#quick-start>` for reconstruction, G1 retargeting and tracking. The walkthrough below also covers generating a new input.
+
 A 5-minute smoke run that exercises every stage of the pipeline on a single
 example asset (`cordless_drill`). Assumes you've completed
 [`installation`](installation.md) and have the docker image (or the
@@ -28,6 +30,8 @@ python -m grail.pipelines.gen_terrain --type stairs --num 5 --output_dir data/sy
 Outputs `data/syn_stairs/stairs_{000..004}/model.obj` plus `texture.jpg`.
 
 ## 3. Generate a 2D HOI video for one object
+
+Supply a Blender scene and a rigged character USD in the 2D configuration before rendering. For existing RGB videos, start at step 4.
 
 ```bash
 python -m grail.pipelines.gen_2dhoi \
@@ -78,7 +82,7 @@ python -m grail.retargeting.soma \
 The command emits an audited SOMA BVH, a source-bound G1+DEx3 target, a
 50-column CSV with all 43 robot joints (including 14 finger joints), and JSON
 receipts. The result remains `RETARGETED_UNREVIEWED` until scene replay and
-contact review. See [Retargeting](retargeting.md#replay-robot-object-and-table)
+contact review. See [Retargeting](retargeting.md)
 for the robot + object + table replay command.
 
 ## Next steps
@@ -89,5 +93,5 @@ for the robot + object + table replay command.
 | Render and re-render scenes with new characters | [`gen_2dhoi`](gen_2dhoi.md) |
 | Tune the 4D reconstruction optimizer | [`recon_4dhoi`](recon_4dhoi.md) |
 | Retarget to Unitree G1 + DEx3 | [`retargeting`](retargeting.md) |
-| Train a SONIC policy | [`tracking`](tracking.md) |
+| Prepare tracking inputs | [`tracking`](tracking.md) |
 | Browse a motion library in the browser | [`web_visualizer`](web_visualizer.md) |

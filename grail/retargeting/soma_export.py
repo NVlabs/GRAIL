@@ -22,9 +22,48 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from grail.retargeting.native_motion import load_native, validate_motion
+from grail.agentic_kinematic.hoi_refinement.native import (
+    evaluate_motion,
+    load_native,
+    validate_motion,
+)
 
 BVH_FROM_GRAIL = np.array([[1.0, 0, 0], [0, 0, 1], [0, -1, 0]])
+SOMA_MOTION_FIELDS = {
+    "model_type",
+    "poses",
+    "trans",
+    "fps",
+    "obj_R",
+    "obj_t",
+    "obj_scale",
+    "identity_coeffs",
+    "scale_params",
+    "human_scale",
+}
+
+
+def _ground_motion(motion, model_config):
+    """Use one frame-zero mesh offset for all native human/object positions."""
+    from .grounding import first_frame_ground_offset, translate_native_motion
+
+    config = dict(model_config)
+    config.setdefault("model_type", config.get("body_model"))
+    config.setdefault("backend", "native")
+    if config["model_type"] != "soma03" or config["backend"] != "native":
+        raise ValueError("Grounding requires explicit soma03 with native backend")
+    # Reusable controls must not inherit caches in the original world frame.
+    canonical = {name: value for name, value in motion.items() if name in SOMA_MOTION_FIELDS}
+    vertices = evaluate_motion(canonical, config, frames=[0])["vertices"][0]
+    offset, receipt = first_frame_ground_offset(vertices)
+    result = translate_native_motion(canonical, offset)
+    validate_motion(result)
+    receipt["omitted_native_source_fields"] = sorted(set(motion) - SOMA_MOTION_FIELDS)
+    receipt["native_source_scope"] = (
+        "Canonical human/object controls; scene and camera use the same world offset "
+        "through their separate handoffs."
+    )
+    return result, offset, receipt
 
 
 def _binding(path):
@@ -281,6 +320,7 @@ def export_soma03_bvh(
     source_world_frame="grail_z_up_m",
     batch_size=32,
     upstream_python=None,
+    ground_initial_frame=False,
 ):
     """Export a trusted GRAIL HOI pickle/canonical NPZ and its immutable bindings.
 
@@ -288,6 +328,9 @@ def export_soma03_bvh(
     supplied, authorizes a fixed nonunit scale but must match the motion exactly.
     The official runtime Python defaults to ``soma_root/.venv/bin/python``.
     Existing outputs are refused; failures retain an explicit failed manifest.
+    ``ground_initial_frame`` applies one Z translation from the first native
+    human mesh minimum to all frames. The manifest carries the same offset for
+    scene/camera handoffs; neutral calibration transforms stay unchanged.
     """
     if source_world_frame != "grail_z_up_m":
         raise ValueError(
@@ -295,6 +338,8 @@ def export_soma03_bvh(
         )
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
+    if type(ground_initial_frame) is not bool:
+        raise ValueError("ground_initial_frame must be boolean")
     source, output, root = (Path(p).expanduser().resolve() for p in (source, output_dir, soma_root))
     if output.exists():
         raise FileExistsError(f"Export output already exists: {output}")
@@ -313,7 +358,7 @@ def export_soma03_bvh(
         raise FileNotFoundError(
             f"Official SOMA runtime Python is required for FK verification: {python}"
         )
-    paths = [source, reference, Path(__file__)]
+    paths = [source, reference, Path(__file__), Path(__file__).with_name("grounding.py")]
     paths += sorted((root / "soma_retargeter").rglob("*.py"))
     paths += native_paths
     paths += [
@@ -322,7 +367,8 @@ def export_soma03_bvh(
             "models/soma03_model.py",
             "models/soma_model.py",
             "models/human_model.py",
-            "retargeting/native_motion.py",
+            "agentic_kinematic/hoi_refinement/native.py",
+            "agentic_kinematic/hoi_refinement/interpolation.py",
         )
     ]
     identity = model_config.get("soma_identity_params_path")
@@ -341,6 +387,8 @@ def export_soma03_bvh(
         "source_facing_direction": "Mujoco",
         "source_world_frame": source_world_frame,
         "world_from_grail": np.eye(3).tolist(),
+        "world_offset": [0.0, 0.0, 0.0],
+        "grounding": {"enabled": False},
         "bvh_from_grail": BVH_FROM_GRAIL.tolist(),
         "fps": info["fps"],
         "frame_count": info["frame_count"],
@@ -360,7 +408,7 @@ def export_soma03_bvh(
         "identity_policy": "preserve every source identity/scale frame; no averaging or replacement",
         "limitations": [
             "Source skeleton export only; robot retargeting and contact review are separate.",
-            "The export does not choose a robot target; G1+DEx3 binding is a separate step.",
+            "Official unitree_g1 target has 29 body/wrist DOFs and no actuated fingers.",
         ],
     }
     output.mkdir(parents=True)
@@ -370,6 +418,11 @@ def export_soma03_bvh(
 
     save()
     try:
+        if ground_initial_frame:
+            motion, offset, grounding = _ground_motion(motion, model_config)
+            report["world_offset"] = offset.tolist()
+            report["grounding"] = dict(grounding, enabled=True)
+            save()
         transforms, rest, actual_names, actual_parents = _native_transforms(
             motion, model_config, batch_size
         )
@@ -436,6 +489,11 @@ def main(argv=None):
     parser.add_argument("--soma-root", required=True, type=Path)
     parser.add_argument("--upstream-python", type=Path)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--ground-initial-frame",
+        action="store_true",
+        help="Translate HOI once so the first human mesh minimum Z is zero",
+    )
     args = parser.parse_args(argv)
     config = json.loads(args.model_config.read_text())
     print(
@@ -447,6 +505,7 @@ def main(argv=None):
                 soma_root=args.soma_root,
                 batch_size=args.batch_size,
                 upstream_python=args.upstream_python,
+                ground_initial_frame=args.ground_initial_frame,
             ),
             indent=2,
         )

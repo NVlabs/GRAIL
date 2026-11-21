@@ -7,10 +7,6 @@
 [submodule "imports/FoundationPose"]
 	path = imports/FoundationPose
 	url = https://github.com/NVlabs/FoundationPose
-[submodule "imports/GEM-SMPL"]
-	path = imports/GEM-SMPL
-	url = https://github.com/NVlabs/GENMO
-	branch = grail
 [submodule "imports/GMR"]
 	path = imports/GMR
 	url = https://github.com/YanjieZe/GMR.git

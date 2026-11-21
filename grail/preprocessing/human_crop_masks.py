@@ -95,14 +95,13 @@ def ensure_human_crop_masks(
 def prepare_pipeline_human_crop(video, model_config, args, video_id, origin_id):
     """Resolve the default crop input without changing the depth-stage order."""
     cfg = dict(model_config)
-    if cfg.get("body_model") in ("smplx", "g1_smplx"):
-        prefix = "gem_smpl"
-    else:
-        prefix = cfg.get("human_pose_backend", "gem_x")
-        if prefix != "gem_x":
-            raise ValueError(f"Unsupported SOMA03 human_pose_backend: {prefix!r}")
+    if cfg.get("body_model", "soma03") != "soma03":
+        raise ValueError("Human crop preparation requires soma03")
+    prefix = cfg.get("human_pose_backend", "gem_x")
+    if prefix != "gem_x":
+        raise ValueError(f"Unsupported SOMA03 human_pose_backend: {prefix!r}")
     key = f"{prefix}_human_crop"
-    enabled = cfg.get(f"{key}_repair", prefix == "gem_x")
+    enabled = cfg.get(f"{key}_repair", True)
     if type(enabled) is not bool:
         raise ValueError(f"{key}_repair must be a boolean")
     if not enabled:

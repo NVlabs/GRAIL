@@ -1,0 +1,5 @@
+vr_3point_local_orn_target:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:vr_3point_local_orn_target
+  params:
+    command_name: "motion"

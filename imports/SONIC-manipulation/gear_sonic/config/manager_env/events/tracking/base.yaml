@@ -1,0 +1,9 @@
+# Standard event composition
+
+defaults:
+  - terms/physics_material@_here_
+  - terms/add_joint_default_pos@_here_
+  - terms/base_com@_here_
+  - terms/push_robot@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.events.EventCfg

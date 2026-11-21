@@ -1,0 +1,63 @@
+# @package _global_
+# One policy/runtime contract for the five rigid-active sources. Source-specific
+# adaptation is confined to the cohort manifest and promoted data packs.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_active_articulation
+  - override /manager_env/terminations: tracking/hoi_grab_no_lift
+  - _self_
+
+exp_var: advanced_manip_ground_unified_no_vof
+
+manager_env:
+  config:
+    robot:
+      type: g1_43dof_yam_core_collision
+    add_object: false
+    active_articulation_usd_path: ""
+    static_context_usd_path: ""
+    active_articulation_fix_root_link: false
+    active_articulation_reference_joint_names: [mechanism_joint]
+    active_articulation_tracked_body_name: panel
+    active_articulation_tracked_prim_path: "{ENV_REGEX_NS}/ActiveArticulation/panel"
+    active_articulation_contact_prim_path: "{ENV_REGEX_NS}/ActiveArticulation/panel"
+    static_context_activate_contact_sensors: false
+    static_context_collision_enabled: true
+    static_context_kinematic: true
+    use_motion_hand_actions: false
+    use_finger_primitive: true
+
+  commands:
+    motion:
+      use_paired_motions: false
+      use_asset_compatible_motions: true
+      motion_lib_num_dof: 29
+      sample_before_contact: false
+      sample_start_truncate_time_s: null
+      motion_lib_cfg:
+        joint_source_manifest: ${oc.env:JOINT_ROSTER_MANIFEST,''}
+        # Direct-directory roster (docs/DIRECT_DIRECTORY_ROSTER.md): name=path[@slots];
+        # exactly one of joint_source_manifest / joint_roster_direct_dirs may be set.
+        joint_roster_direct_dirs: ${oc.env:JOINT_ROSTER_DIRECT_DIRS,''}
+        target_fps: 50
+        adaptive_sampling: null
+        bps_object_name_resolution: false
+
+  observations:
+    # The legacy critic flag is a source reference-contact label. Every
+    # remaining contact observation comes from the simulator sensors.
+    critic:
+      grab_contact_flag: null
+
+  rewards:
+    # Ordinary per-hand reward policy inherited from the base (required 20 / neutral 2 / known no-contact 2 x
+    # openness); the old gate_with_contact_label switch no longer exists for these terms.
+    # These inherited terms read source contact labels/centers, so they do not
+    # belong in a source-neutral simulated-contact baseline.
+    grasp_finger_direction: null
+    grasp_finger_direction_left: null
+    grasp_contact_center_right: null
+    grasp_contact_center_left: null
+
+  terminations:
+    # Inherited grasp failure arms from the reference in_contact label.
+    grasp_failure_after_contact: null

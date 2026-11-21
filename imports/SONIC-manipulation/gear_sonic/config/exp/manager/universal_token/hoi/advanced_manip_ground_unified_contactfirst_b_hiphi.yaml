@@ -1,0 +1,17 @@
+# @package _global_
+# B + only the four HiPHI optimizer/exploration settings (five config keys).
+# No C tracking/relation additions or D non-hand contact terms.
+# Keep B's inherited finger-primitive limit (-10), not C's changed value (-1).
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_b
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_b_hiphi
+
+algo:
+  config:
+    init_noise_std: 0.3
+    freeze_noise_std: true
+    actor_learning_rate: 1.0e-4
+    entropy_coef: 1.0e-4
+    desired_kl: 0.05

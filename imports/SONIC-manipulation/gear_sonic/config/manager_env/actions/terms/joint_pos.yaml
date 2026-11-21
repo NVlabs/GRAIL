@@ -1,0 +1,5 @@
+joint_pos:
+  _target_: isaaclab.envs.mdp.actions.JointPositionActionCfg
+  asset_name: "robot"
+  joint_names: [".*"]
+  use_default_offset: true

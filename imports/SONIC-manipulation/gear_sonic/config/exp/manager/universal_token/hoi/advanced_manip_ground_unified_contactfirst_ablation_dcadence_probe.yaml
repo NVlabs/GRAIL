@@ -1,0 +1,12 @@
+# @package _global_
+# Validation-only probe: arm D plus the 100-update last.pt cap, run with the
+# production 500/500 launcher cadences to confirm the cap and resume path.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_d
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_dcadence_probe
+
+callbacks:
+  model_save:
+    save_last_frequency_cap: 100

@@ -1,0 +1,6 @@
+command_multi_future_nonflat:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:command_multi_future
+  params:
+    command_name: "motion"
+    non_flatten: True

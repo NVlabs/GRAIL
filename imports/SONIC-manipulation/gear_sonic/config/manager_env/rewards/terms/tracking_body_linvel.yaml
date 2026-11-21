@@ -1,0 +1,7 @@
+tracking_body_linvel:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:tracking_body_linvel_error
+  weight: 1.0
+  params:
+    command_name: "motion"
+    std: 1.0

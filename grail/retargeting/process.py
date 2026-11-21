@@ -317,9 +317,7 @@ def _target_frame_count_to_source_frame_count(
 
     # Match MotionLibBase.load_motions hand-action upsampling:
     # round(linspace(0, src_len - 1, num_target_frames)).
-    source_indices = np.round(
-        np.linspace(0, source_num_frames - 1, target_num_frames)
-    ).astype(int)
+    source_indices = np.round(np.linspace(0, source_num_frames - 1, target_num_frames)).astype(int)
     return int(source_indices[:target_frame_count].max()) + 1
 
 
@@ -688,7 +686,9 @@ def main():
             ] = left_arm_zero_joints
 
         if args.shoulder_first_frame_blend:
-            shoulder_joint_idxs = apply_default_first_frame_shoulder_dof_blend(robot_motion[f], skeleton_info)
+            shoulder_joint_idxs = apply_default_first_frame_shoulder_dof_blend(
+                robot_motion[f], skeleton_info
+            )
             shoulder_defaults = SHOULDER_FIRST_FRAME_BLEND_DEFAULTS
             print(
                 f"  Applied shoulder first-frame blend to DOFs {shoulder_joint_idxs}: "
@@ -834,8 +834,13 @@ def main():
                     parser.error(
                         "Use either --right_hand_closed_until_seconds or --right_hand_closed_until_frame, not both"
                     )
-                if args.right_hand_closed_until_seconds is None and args.right_hand_closed_until_frame is not None:
-                    right_hand_closed_until_seconds = float(args.right_hand_closed_until_frame) / 50.0
+                if (
+                    args.right_hand_closed_until_seconds is None
+                    and args.right_hand_closed_until_frame is not None
+                ):
+                    right_hand_closed_until_seconds = (
+                        float(args.right_hand_closed_until_frame) / 50.0
+                    )
                 else:
                     right_hand_closed_until_seconds = args.right_hand_closed_until_seconds
                 apply_right_hand_closed_until_seconds(

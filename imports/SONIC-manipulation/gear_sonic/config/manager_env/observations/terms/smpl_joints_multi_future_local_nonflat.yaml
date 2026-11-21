@@ -1,0 +1,6 @@
+smpl_joints_multi_future_local_nonflat:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:smpl_joints_multi_future_local
+  params:
+    command_name: "motion"
+    non_flatten: True

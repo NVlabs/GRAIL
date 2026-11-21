@@ -16,12 +16,7 @@ python -m grail.pipelines.gen_2dhoi \
     --results_dir results --video_model_api kling-ai
 ```
 
-The default config uses the bundled Unitree-G1 DHGen character
-`unitree_g1_dhgen_00008` at its authored `0.01` import scale. Its exact USD,
-textures, and manifest live under
-`data/body_profiles/unitree_g1/characters/dhgen_00008/`; no legacy character
-asset is required. Use `--character_usd`, `--character`, and
-`--character_scale` only to select an explicit custom character.
+Configure `character_usd` with your local character and `character_scale` with its authored unit conversion.
 
 Outputs:
 
@@ -184,8 +179,7 @@ bash grail/adapters/minimax_h3_service.sh \
     single-gb-parity-vae-resident 30020
 ```
 
-The launcher performs no `sbatch`, `srun`, Docker, or filesystem-specific
-setup. Without an explicit service root it creates a unique temporary
+The launcher runs local processes.
 directory and prints the descriptor path. Useful overrides are:
 
 - `MINIMAX_H3_SERVICE_ROOT`: descriptor, logs, cache, staging, and outputs.
@@ -270,3 +264,6 @@ python -m grail.pipelines.gen_2dhoi \
     --job_chunk_idx <i> \
     --num_job_chunks <N>
 ```
+
+
+Supply your own Blender scene and character paths in the scene configuration before rendering. The scene files and textured character are distributed separately from the code.

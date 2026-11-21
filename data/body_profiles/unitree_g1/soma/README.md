@@ -9,6 +9,3 @@ The NPZ stores native SOMA PCA identity coefficients and local scale parameters.
 Its paired JSON records the fixed global scale and file hash. The identity is an
 approximate human body envelope for G1 motion generation, not a contact-quality
 or hardware-safety certification.
-
-The DHGen character in `../characters/dhgen_00008/` is a rendering asset. It is
-not used as a body model, and no legacy commercial character asset is required.

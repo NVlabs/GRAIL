@@ -1,0 +1,81 @@
+# @package manager_env
+# Base tracking environment configuration
+# This config provides defaults that can be overridden with specific combinations
+
+defaults:
+  - actions: tracking/base
+  - observations/policy: global
+  - observations/critic: privileged
+  - observations/tokenizer:
+  - observations/height_map:
+  - observations/policy_atm:
+  - observations/residual_action:
+  - rewards: tracking/base
+  - terminations: tracking/base
+  - commands: tracking/base
+  - events: tracking/base
+  - curriculum: empty
+  - recorders: empty
+  - _self_
+
+# Environment configuration
+_target_: gear_sonic.envs.manager_env.modular_tracking_env_cfg.ModularTrackingEnvCfg
+
+observations:
+  _target_: gear_sonic.envs.manager_env.mdp.observations.ObservationsCfg
+
+config:
+  num_envs: ${num_envs}
+  env_spacing: 2.0
+  decimation: 4
+  episode_length_s: 10.0
+  sim_dt: 0.005
+  viewer_eye: [4.5, 0.0, 6.0]
+  viewer_lookat: [0.0, 0.0, 2.0]
+  render_results: false
+  save_rendering_dir: ${experiment_dir}/renderings_training
+  experiment_dir: ${experiment_dir}
+  terrain_type: plane # "0: plane" or "1: trimesh"
+  # PhysX parses env_0/Robot once and replicates it to all envs (see gear_sonic/physx_replication.py).
+  physx_robot_replication: true
+  physx_replication_prims: [Robot]
+
+  # Object mass override (kg). Set to override USD-defined mass.
+  # Example: ++manager_env.config.object_mass=0.1
+  object_mass: null
+
+  # Table position offset [x, y, z] added to table position from meta file
+  # Useful for adjusting table position relative to the robot
+  # Example: ++manager_env.config.table_offset=[0.0, 0.1, 0.0]
+  table_offset: null
+
+  # Eval camera offset [X, Y, Z] relative to robot root position
+  # Default: [2, 2, 1] = 2m forward, 2m left, 1m up
+  eval_camera_offset: [2, 2, 1]
+
+  action_transform_module_cfg:
+  action_transform_module_checkpoint:
+  meta_action_dim:
+  needs_policy_atm: true
+  # Optional PPO-owned residual appended between latent and hand actions.
+  # Disabled by default; RP2 action-noise ablations enable all 29 G1 body DOFs.
+  raw_body_residual_dim: 0
+  raw_body_residual_units: joint_position_radians
+  raw_body_residual_clip: null
+
+  obs:
+    obs_dict: {}
+    obs_dims: {}
+    group_obs_dims: {}
+    group_obs_names: {}
+
+  action_clip_value: 20.0
+  robot:
+    type: "g1"
+    algo_obs_dim_dict: {}
+  rewards:
+    num_critics: 1
+
+  train_only_events:
+    - push_robot
+    - compliance_force_push  # New name for force-based push (compliance training)

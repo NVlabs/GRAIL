@@ -1,0 +1,6 @@
+# No domain-randomization events.
+#
+# Use this for release/debug sweeps that intentionally disable all startup,
+# reset, and interval randomization terms.
+
+_target_: gear_sonic.envs.manager_env.mdp.events.EventCfg

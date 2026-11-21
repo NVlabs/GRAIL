@@ -1,0 +1,7 @@
+tracking_relative_body_ori:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:tracking_relative_body_ori_error
+  weight: 1.0
+  params:
+    command_name: "motion"
+    std: 0.4

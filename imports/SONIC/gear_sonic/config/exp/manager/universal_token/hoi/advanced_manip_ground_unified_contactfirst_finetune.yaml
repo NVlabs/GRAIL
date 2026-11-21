@@ -1,0 +1,128 @@
+# @package _global_
+# Production per-object manipulation finetune launch (ContactFirst), as a first-class
+# SONIC experiment. Launch from imports/SONIC in the sonic environment:
+#
+#   python gear_sonic/train_agent_trl.py \
+#       +exp=manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_finetune \
+#       num_envs=2048 headless=True base_dir=<run dir> ++experiment_dir=<run dir>/train \
+#       checkpoint=<manip_warmstart/last.pt> ++resume=false \
+#       ++algo.config.num_learning_iterations=5000 \
+#       ++manager_env.commands.motion.motion_lib_cfg.motion_file=<pack cohort robot dir> \
+#       ++manager_env.commands.motion.motion_lib_cfg.object_motion_file=<pack cohort objects dir> \
+#       ++manager_env.commands.motion.motion_lib_cfg.bps_dir=<pack cohort bps dir> \
+#       ++manager_env.config.object_physics_overrides_path=<pack group physics.json> \
+#       ++manager_env.recorders._target_=gear_sonic.envs.manager_env.mdp.group_metrics.make_recorders \
+#       ++manager_env.recorders.output_root=<run dir> \
+#       ++manager_env.recorders.roster_manifest=<pack group cohort manifest.json>
+#
+# (JOINT_ROSTER_MANIFEST must name the same cohort manifest in the environment.)
+# scripts/tracking/manipulation_finetune.sh in the GRAIL repository assembles these
+# run-specific values from a pack directory. The single-GPU launcher evaluates
+# checkpoints every 1000 updates after the trainer exits.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_d
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_finetune
+
+motion_shard_by_rank: true
+
+# ContactFirst process runtime: node-local disposable caches, Kit/TBB/PhysX thread
+# limits and float32 FK inputs for archived float64 motion samples. Never set for
+# the released task-general tracking configs.
+contactfirst_runtime:
+  enabled: true
+  cpu_threads: 8
+  local_cache: true
+  fk_float32: true
+
+algo:
+  config:
+    num_mini_batches: 4
+    actor_learning_rate: 2e-5
+    critic_learning_rate: 1e-3
+    use_log_std: false
+    freeze_noise_std: false
+    # num_learning_iterations is an ABSOLUTE update target: a resumed run
+    # continues from its restored global_step to the same target.
+    absolute_update_target: true
+    # Exact-resume contract (only active with ++resume=true):
+    require_exact_checkpoint_actor_keys: true
+    reset_noise_std_on_checkpoint_load: false
+    resume_restore_param_group_lrs: true
+    resume_verify_exact: true
+
+manager_env:
+  config:
+    motion_meta_info_path: null
+    safe_nan: true
+    multi_object_per_env: false
+    enable_multi_object_contact_sensors: false
+    enable_multi_object_support_contact_sensors: false
+    enable_feet_terrain_contact: true
+    render_results: false
+    hand_target_slew:
+      enabled: true
+      close_per_s: 4.0
+      open_per_s: 5.0
+    # Production PhysX GPU buffer capacities for 2048 environments on one GPU.
+    physx_gpu_buffers:
+      gpu_collision_stack_size: 536870912
+      gpu_found_lost_aggregate_pairs_capacity: 134217728
+      gpu_found_lost_pairs_capacity: 134217728
+      gpu_heap_capacity: 536870912
+      gpu_max_rigid_contact_count: 67108864
+      gpu_max_rigid_patch_count: 33554432
+      gpu_temp_buffer_capacity: 134217728
+      gpu_total_aggregate_pairs_capacity: 16777216
+  commands:
+    motion:
+      sample_before_contact: false
+      start_from_first_frame: false
+      object_position_randomize: false
+      use_dynamic_target_object_mask: false
+      full_scene_per_env: false
+      motion_lib_cfg:
+        max_num_objects: 1
+        max_unique_motions: null
+        remove_motion_keys: null
+        smpl_motion_file: dummy
+        multi_thread: false
+        fp16_reference_tensors: true
+        bps_object_name_resolution: false
+        joint_source_tracking: true
+        asset:
+          assetRoot: gear_sonic/data/assets/robot_description/mjcf/
+        adaptive_sampling:
+          enable: true
+          distributed_keyed_sync: true
+          update_on_episode_end_only: true
+          priority_mode: beta_capped_difficulty
+          difficulty_warmup_completed_episodes: 100
+          difficulty_soft_success_floor: 0.10
+          difficulty_min_weight: 0.05
+          difficulty_beta_cap: 3.0
+          uniform_sampling_rate: 0.10
+          init_num_failures: 1
+  events:
+    add_joint_default_pos: null
+    base_com: null
+    randomize_rigid_body_mass: null
+    randomize_table_size: null
+    randomize_object_size: null
+    physics_material: null
+  observations:
+    policy:
+      enable_corruption: false
+    tokenizer:
+      enable_corruption: false
+    policy_atm:
+      enable_corruption: false
+
+callbacks:
+  model_save:
+    save_frequency: 1000
+    save_last_frequency: 20
+  contactfirst:
+    _target_: gear_sonic.trl.callbacks.contactfirst_callbacks.ContactFirstCallback
+    output_root: ${base_dir}

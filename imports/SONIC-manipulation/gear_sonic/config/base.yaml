@@ -1,0 +1,52 @@
+# First we define the global structures that will be used by all the configs.
+defaults:
+  # - base/fabric
+  - _self_
+  - base/hydra
+  - base/structure
+  - callbacks/model_save
+  - callbacks/wandb
+  - trainer: trl
+  - opt/wandb
+
+num_gpus: 1
+max_retries: 1
+
+# These are global variables that all levels of the config can access.
+## Experiment setup
+seed: 0
+codebase_version: 1.0  # this is recorded to enable auto-conversion of models between different versions of the codebase
+headless: True
+num_envs: 4096
+
+### Checkpoint logic
+auto_load_latest: False
+checkpoint: null
+
+### Naming and dir structure
+project_name: TEST
+experiment_name: TEST
+
+base_dir: logs_rl
+timestamp: ${now:%Y%m%d_%H%M%S}
+experiment_dir: ${base_dir}/${project_name}/$${experiment_name}-${timestamp}
+save_dir: ${experiment_dir}/.hydra
+
+force_flat_terrain: False
+
+use_wandb: false
+log_task_name: TEST
+
+multi_gpu: False
+global_rank: 0
+
+### Simulation
+sim_type: isaacsim
+env_spacing: 20
+output_dir: ${experiment_dir}/output
+
+eval_overrides:
+  headless: False
+  num_envs: 1
+  auto_load_latest: False
+  use_wandb: False

@@ -1,0 +1,5 @@
+object_bps:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:object_bps
+  params:
+    command_name: "motion"

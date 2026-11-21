@@ -1,0 +1,31 @@
+# @package _global_
+# B+HiPHI + LoRA on the SONIC g1_dyn decoder (see gear_sonic/trl/modules/sonic_decoder_lora.py).
+# Rewards, observations, terminations, the 66-D latent/hand action, sigma 0.3 and the
+# actor's optimizer settings are inherited unchanged.  The decoder enters the PPO
+# likelihood through a Gaussian body-joint factor (fixed std 0.05 action units = SONIC's
+# own init_noise_std); actor and adapters use factored clipped surrogates / KL-adaptive LRs.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_b_hiphi
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_b_hiphi_sonic_lora
+
+algo:
+  config:
+    sonic_lora_factored_ppo: true
+    actor:
+      _target_: gear_sonic.trl.modules.sonic_decoder_lora.SonicDecoderLoRAActor
+      sonic_decoder_lora:
+        target_decoder: g1_dyn
+        rank: 8
+        alpha: 16
+        dropout: 0.0
+        latent_dim: 64
+        stochastic_body: true
+        body_action_dim: 29
+        body_action_std: 0.05
+        learning_rate: 1.0e-4
+
+manager_env:
+  config:
+    stochastic_decoder_body_action_dim: 29

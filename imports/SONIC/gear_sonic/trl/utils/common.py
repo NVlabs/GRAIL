@@ -7,8 +7,53 @@ import time
 from omegaconf import OmegaConf, DictConfig, ListConfig
 
 
+def ensure_trl_trainer_utils_alias():
+    """Make TRL < 0.28.0 checkpoints unpicklable on newer TRL installs.
+
+    Old checkpoints pickle references to trl.trainer.utils.{OnlineTrainerState,
+    exact_div}, which moved to trl.experimental.ppo in TRL 0.28.0. Register an
+    alias module in sys.modules when the import fails, and backfill the moved
+    attributes when the module imports without them. Call this before any
+    torch.load of a policy / action-transform checkpoint.
+    """
+    import sys as _sys
+    import types as _types
+
+    try:
+        from trl.experimental.ppo.ppo_trainer import OnlineTrainerState, exact_div
+    except ImportError:
+
+        class OnlineTrainerState:  # placeholder for unpickling only
+            pass
+
+        def exact_div(a, b, custom_error_message=""):
+            return a // b
+
+    try:
+        import trl.trainer.utils as _trl_trainer_utils
+    except ImportError:
+        _trl_trainer_utils = _types.ModuleType("trl.trainer.utils")
+        _sys.modules["trl.trainer.utils"] = _trl_trainer_utils
+    if not hasattr(_trl_trainer_utils, "OnlineTrainerState"):
+        _trl_trainer_utils.OnlineTrainerState = OnlineTrainerState
+    if not hasattr(_trl_trainer_utils, "exact_div"):
+        _trl_trainer_utils.exact_div = exact_div
+
+
 def wandb_run_exists():
-    return isinstance(wandb.run, wandb.sdk.wandb_run.Run)
+    return current_wandb_run_id() is not None
+
+
+def current_wandb_run_id():
+    """Return the active persistent run ID, excluding disabled W&B dummy runs."""
+    if os.environ.get("WANDB_MODE", "").strip().lower() == "disabled":
+        return None
+    run = getattr(wandb, "run", None)
+    run_id = getattr(run, "id", None)
+    if not isinstance(run_id, str):
+        return None
+    run_id = run_id.strip()
+    return run_id or None
 
 
 def import_type_from_str(s):

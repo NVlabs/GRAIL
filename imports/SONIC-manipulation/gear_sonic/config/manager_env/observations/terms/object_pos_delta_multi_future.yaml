@@ -1,0 +1,5 @@
+object_pos_delta_multi_future:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:object_pos_delta_multi_future
+  params:
+    command_name: "motion"

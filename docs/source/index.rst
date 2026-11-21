@@ -58,7 +58,7 @@ Pipeline at a glance
            ↓
    imports/soma-retargeter + GMR MJCF   →  Unitree G1+DEx3 joint trajectories
            ↓
-   imports/SONIC                        →  Task-general tracking policy training
+   python -m grail.retargeting.manipulation.handoff  →  Reviewed tracking inputs
 
 Sim-to-Real Deployment
 ----------------------
@@ -101,12 +101,9 @@ Bundled Dependencies
    * - Path
      - Upstream
      - Purpose
-   * - ``imports/SONIC``
-     - GRAIL-vendored SONIC release tree
-     - RL training, inference, deploy stack
    * - ``imports/GMR``
      - `YanjieZe/GMR <https://github.com/YanjieZe/GMR>`_
-     - Legacy SMPL-X → robot retargeting engine
+     - G1+DEx3 robot geometry for the SOMA retargeter
    * - ``imports/GEM-X``, ``imports/soma-retargeter``
      - `NVlabs/GEM-X <https://github.com/NVlabs/GEM-X>`_ / `NVIDIA SOMA Retargeter <https://github.com/NVIDIA/soma-retargeter>`_
      - Native SOMA prediction and source-bound SOMA → Unitree G1+DEx3 retargeting
@@ -119,6 +116,9 @@ Bundled Dependencies
    * - ``imports/Sana``
      - `NVlabs/Sana <https://github.com/NVlabs/Sana>`_
      - MiniMax-H3 video generation through Sol-Engine
+   * - ``imports/agentic-retargeter``
+     - Vendored Agentic Retargeter snapshot (plain directory, NVIDIA License)
+     - Agentic robot retargeting, native grasp editing, repair and audits
 
 Initialize with:
 
@@ -140,6 +140,7 @@ Initialize with:
    gen_3d_assets
    gen_2dhoi
    recon_4dhoi
+   agentic_kinematic
    retargeting
    tracking
 

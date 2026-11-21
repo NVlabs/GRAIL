@@ -1,0 +1,4 @@
+action_rate_l2:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:action_rate_l2
+  weight: -1e-1

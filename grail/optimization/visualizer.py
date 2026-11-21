@@ -15,7 +15,11 @@ from grail.rendering.camera import get_camera
 from grail.rendering.renderer import create_renderer, render_frame
 from grail.rendering.textures import create_colored_meshes, create_mesh_with_vertex_colors
 from grail.visualization.scenepic import ScenepicVisualizer
-from grail.visualization.utils.vis_utils import motion_seq_to_scenepic, prep_visualizer_input
+from grail.visualization.utils.vis_utils import (
+    embedded_static_mesh,
+    motion_seq_to_scenepic,
+    prep_visualizer_input,
+)
 
 
 class HOIVisualizer:
@@ -45,7 +49,13 @@ class HOIVisualizer:
         static_objects = data.static_objects
         if static_objects is not None:
             for obj_key, obj_data in static_objects.items():
-                if obj_key != "table":
+                if "vertices" in obj_data or "faces" in obj_data:
+                    static_vertices, static_faces = embedded_static_mesh(obj_data, self.device)
+                    self._vis_static_meshes_data[obj_key] = {
+                        "vertices": static_vertices,
+                        "faces": static_faces,
+                    }
+                elif obj_key != "table":
                     obj_path = obj_data.get("path", "data/Scene/long_table.obj")
                     if not os.path.exists(obj_path):
                         continue
@@ -101,11 +111,20 @@ class HOIVisualizer:
             self.cameras, (data.camera.frame_height, data.camera.frame_width), device=self.device
         )
 
-        # Get hand vertex indices for contact visualization
+        # Get hand and foot vertex indices for contact visualization.
         left_hand_indices = right_hand_indices = None
+        foot_contact_indices = foot_contact_probs = None
+        foot_contact_threshold = vis_cfg.get("foot_contact_threshold", 0.4)
         if vis_contact:
             left_hand_indices = self.human_model.get_segment_indices(["L_Hand"])
             right_hand_indices = self.human_model.get_segment_indices(["R_Hand"])
+            if vis_cfg.get("vis_foot_contact", True) and data.human.foot_contact_probs is not None:
+                # GEM contact channels are [L ankle, L toe, R ankle, R toe].
+                foot_contact_indices = [
+                    self.human_model.get_segment_indices([label])
+                    for label in ("L_Ankle", "L_Toe", "R_Ankle", "R_Toe")
+                ]
+                foot_contact_probs = data.human.foot_contact_probs.to(self.device)
 
         inter_start_idx = data.inter_start_idx
         inter_end_idx = data.inter_end_idx
@@ -126,6 +145,9 @@ class HOIVisualizer:
                 vis_contact,
                 left_hand_indices,
                 right_hand_indices,
+                foot_contact_indices,
+                foot_contact_probs,
+                foot_contact_threshold,
                 inter_start_idx,
                 inter_end_idx,
                 vis_name,
@@ -142,13 +164,10 @@ class HOIVisualizer:
                 data,
             )
 
+            # Build static object meshes
+            static_object_meshes = self._build_static_meshes(motion_seq)
+
             for view_name, view_cam, view_renderer in extra_views:
-                # A table obscures the human-object interaction from above and
-                # adds no useful context there. Keep every other static scene
-                # object, and retain tables in side/front views.
-                static_object_meshes = self._build_static_meshes(
-                    motion_seq, exclude_tables=view_name == "top_view"
-                )
                 self._render_video(
                     os.path.join(vis_dir, f"{vis_name}_{view_name}.mp4"),
                     frame_num,
@@ -163,6 +182,9 @@ class HOIVisualizer:
                     vis_contact,
                     left_hand_indices,
                     right_hand_indices,
+                    foot_contact_indices,
+                    foot_contact_probs,
+                    foot_contact_threshold,
                     inter_start_idx,
                     inter_end_idx,
                     f"{vis_name} ({view_name})",
@@ -187,6 +209,9 @@ class HOIVisualizer:
                     vis_contact,
                     left_hand_indices,
                     right_hand_indices,
+                    foot_contact_indices,
+                    foot_contact_probs,
+                    foot_contact_threshold,
                 )
                 if export_mesh:
                     save_mesh(
@@ -196,7 +221,8 @@ class HOIVisualizer:
                     )
 
         if vis_cfg.get("vis_html", False) and self.sp_visualizer is not None:
-            vis_input = motion_seq_to_scenepic(motion_seq, hoi_data)
+            # Preserve the already-processed coordinate frame stored in hoi_data.pkl.
+            vis_input = motion_seq_to_scenepic(motion_seq, hoi_data, normalize_trans=False)
             self.sp_visualizer.vis_scene(
                 vis_input,
                 os.path.join(vis_dir, f"{vis_name}.html"),
@@ -221,6 +247,9 @@ class HOIVisualizer:
         vis_contact,
         left_hand_indices,
         right_hand_indices,
+        foot_contact_indices,
+        foot_contact_probs,
+        foot_contact_threshold,
         inter_start_idx,
         inter_end_idx,
         desc,
@@ -243,6 +272,9 @@ class HOIVisualizer:
                     vis_contact,
                     left_hand_indices,
                     right_hand_indices,
+                    foot_contact_indices,
+                    foot_contact_probs,
+                    foot_contact_threshold,
                     static_meshes=static_meshes,
                 )
 
@@ -274,10 +306,15 @@ class HOIVisualizer:
         vis_contact,
         left_hand_indices,
         right_hand_indices,
+        foot_contact_indices,
+        foot_contact_probs,
+        foot_contact_threshold,
         static_meshes=None,
     ):
         """Build a single-frame HOI mesh with optional contact coloring."""
-        if vis_contact and left_hand_indices is not None:
+        has_hand_contact = left_hand_indices is not None or right_hand_indices is not None
+        has_foot_contact = foot_contact_indices is not None and foot_contact_probs is not None
+        if vis_contact and (has_hand_contact or has_foot_contact):
             human_verts = human_verts_seq[frame_idx]
             obj_verts = obj_verts_seq[frame_idx]
             human_colors, obj_colors = self._compute_contact_colors(
@@ -287,6 +324,10 @@ class HOIVisualizer:
                 right_hand_indices,
                 human_color,
                 obj_color,
+                foot_contact_indices=foot_contact_indices,
+                foot_contact_probs=foot_contact_probs,
+                frame_idx=frame_idx,
+                foot_contact_threshold=foot_contact_threshold,
             )
             human_mesh = create_mesh_with_vertex_colors(
                 human_verts, human_faces, human_colors, device=self.device
@@ -312,13 +353,20 @@ class HOIVisualizer:
         human_color,
         obj_color,
         contact_threshold=0.05,
+        foot_contact_indices=None,
+        foot_contact_probs=None,
+        frame_idx=None,
+        foot_contact_threshold=0.4,
     ):
-        """Compute per-vertex colors based on hand-object contact proximity."""
+        """Compute hand-proximity and label-driven foot-contact colors."""
         red_color = torch.tensor([1.0, 0.0, 0.0], device=self.device)
+        foot_color = torch.tensor([0.0, 1.0, 0.0], device=self.device)
         human_colors = human_color.unsqueeze(0).repeat(human_verts.shape[0], 1)
         obj_colors = obj_color.unsqueeze(0).repeat(obj_verts.shape[0], 1)
 
         for hand_indices in [left_hand_indices, right_hand_indices]:
+            if hand_indices is None or len(hand_indices) == 0:
+                continue
             hand_indices_tensor = torch.tensor(hand_indices, device=self.device, dtype=torch.long)
             hand_verts = human_verts[hand_indices_tensor]
 
@@ -331,6 +379,15 @@ class HOIVisualizer:
             min_dist_per_hand, _ = distances.min(dim=0)
             hand_contact_mask = min_dist_per_hand < contact_threshold
             human_colors[hand_indices_tensor[hand_contact_mask]] = red_color
+
+        if foot_contact_indices is not None and foot_contact_probs is not None:
+            if frame_idx is None:
+                raise ValueError("frame_idx is required for foot-contact visualization")
+            frame_contact_probs = foot_contact_probs[frame_idx, : len(foot_contact_indices)]
+            for indices, probability in zip(foot_contact_indices, frame_contact_probs):
+                if probability > foot_contact_threshold:
+                    indices_tensor = torch.as_tensor(indices, device=self.device, dtype=torch.long)
+                    human_colors[indices_tensor] = foot_color
 
         return human_colors, obj_colors
 
@@ -414,21 +471,12 @@ class HOIVisualizer:
             extra_views.append((f"{vname}_view", cam, view_renderer))
         return extra_views
 
-    def _build_static_meshes(self, motion_seq, exclude_tables=False):
+    def _build_static_meshes(self, motion_seq):
         """Build static object meshes (e.g. table) from motion_seq data."""
         static_meshes = []
         table_color = [0.7, 0.7, 0.7]
         for seq_key in motion_seq.keys():
             if seq_key.startswith("static_") and seq_key.endswith("_seq"):
-                object_key = seq_key[len("static_") : -len("_seq")]
-                normalized_key = object_key.lower()
-                is_table = (
-                    normalized_key == "table"
-                    or normalized_key.startswith("table")
-                    or normalized_key.endswith("_table")
-                )
-                if exclude_tables and is_table:
-                    continue
                 static_seq = motion_seq[seq_key]
                 static_verts = tensor_to(static_seq["vertices"], device=self.device)
                 static_faces = tensor_to(static_seq["triangles"], device=self.device)

@@ -1,0 +1,81 @@
+# @package _global_
+# RP2 contact ablation arm D: arm C plus canonical required non-hand contact.
+# These packs' static-context USDs are collision-only, so contact with them
+# cannot be sensed; the required term covers
+# only the measurable classes. Static-context labels remain in the packs.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_c
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_d
+
+manager_env:
+  config:
+    enable_canonical_full_body_contact_sensors: true
+    canonical_static_context_contact_sensor_enabled: false
+    # The default "/World/ground" filter is the terrain Xform and silently
+    # reports zero force; the plane's collider is required.
+    canonical_ground_contact_filter_prim_path: /World/ground/terrain/GroundPlane/CollisionPlane
+
+    # Execution-only subset shared by base, mass03, noise-only and LoRA.
+    # Keep sensor cadence/history and the force-reading consumers unchanged.
+    runtime_sync_cleanup:
+      enabled: true
+      omit_unused_env_actions_cpu_copy: true
+      # Shared training default: one on-device (num_sources, 3) snapshot per step replaces four
+      # .item() host syncs per source; identical episode / failure / success_rate values and log keys as the legacy
+      # dictionary path (verified snapshot == legacy dict). Logging-only read of the source
+      # counters: sampling, episode attribution and the keyed DDP merge are untouched. An explicit false here would
+      # override the helper's fallback, so the applicable default is stated in this base entry (LoRA/probe entries inherit).
+      batch_joint_source_metrics: true
+      sync_free_contact_cache_invalidation: true
+      benchmark_log_interval_steps: 240
+    contact_force_family_cache: true
+
+  rewards:
+    canonical_required_nonhand_contact:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp.rp2_source_relation:canonical_required_contact_reward
+      weight: 5.0
+      params:
+        command_name: motion
+        entity_classes: [active_entity, ground]
+        body_groups:
+          - pelvis_core
+          - torso
+          - head
+          - left_thigh
+          - left_shin
+          - left_foot
+          - left_upper_arm
+          - left_forearm
+          - right_thigh
+          - right_shin
+          - right_foot
+          - right_upper_arm
+          - right_forearm
+        force_threshold_n: 1.0
+        force_release_threshold_n: 0.5
+        persistence_frames: 2
+    canonical_forbidden_full_body_contact:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp.rp2_source_relation:canonical_forbidden_contact_penalty
+      weight: 0.0
+      params:
+        command_name: motion
+        entity_classes: [active_entity, ground]
+        force_threshold_n: 1.0
+        force_release_threshold_n: 0.5
+        persistence_frames: 2
+
+# Execution only: free CUDA tensors held in Python reference cycles every PPO
+# update. Without it, 8192-env runs OOM within ~50 updates.
+algo:
+  config:
+    gc_collect_every_n_iterations: 1
+    # Batch logging probes and retain only PPO-consumed rollout observations.
+    # SonicDecoderLoRAActor keeps policy_atm for both the noise-only and LoRA arms.
+    host_probe_batching: true
+    deferred_rollout_episode_stats: true
+    storage_skip_unused_obs: true
+    perf_timing_log: true

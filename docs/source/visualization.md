@@ -61,7 +61,7 @@ Three layouts in the wild all satisfy this:
 
 | Layout | Producer | Quat convention | Hand DOFs |
 |---|---|---|---|
-| `data/motion_lib/<name>/` | legacy SMPL-X/GMR retargeting pipeline (`grail.retargeting.retarget`) | **wxyz** | none |
+| `data/motion_lib/<name>/` | archived SMPL-X/GMR motion libraries | **wxyz** | none |
 | `logs_rl/<exp>/exported/step_*/shard_*/` | data-export pipeline (`grail.data_export.export_successful_rollouts`) | **xyzw** | `hand_dof_pos: (T, 14)` |
 | `data/<name>/` | released dataset | **xyzw** | inherited from exported data |
 
@@ -135,7 +135,7 @@ visualize_single.sh <robot_pkl_path> [cam_offset_x,y,z] [quat_convention]
 
 `root_rot` is stored in two different conventions across the codebase:
 
-- {blob}`grail/retargeting/retarget.py` writes **wxyz**.
+- Archived G1 motion-library files can use **wxyz**.
 - {blob}`grail/data_export/export_successful_rollouts.py` writes **xyzw**.
 
 The renderer expects wxyz, so `prepare_vis_shard.py` canonicalizes before
@@ -211,7 +211,7 @@ at the same motion library.
 | Symptom | Likely cause / fix |
 |---|---|
 | Robot is rotated horizontally / lying on its side | Wrong `quat_convention`. Retarget pkls are `wxyz`; data-export and release pkls are `xyzw`. Match it explicitly instead of relying on `auto`. |
-| Gripper stays open even at the grasp moment | `robot/<seq>.pkl` lacks `hand_dof_pos`. Re-run the data-export step with the post-2026-06-01 code (it persists the full 14-DOF hand trajectory alongside the scalar averages). |
+| Gripper stays open even at the grasp moment | `robot/<seq>.pkl` lacks `hand_dof_pos`. Export the hand joint positions with the robot motion. |
 | `Error: required subdir missing: <path>/object_usd` | The directory isn't a motion-library layout. Verify `robot/`, `objects/`, `object_usd/` all exist; `meta/` is optional. |
 | `[DOF] Padding 29-DOF trajectories to 43-DOF articulation` printed and the gripper looks open | Expected when `hand_dof_pos` is absent — the renderer pads with zeros (= open pose). Not an error. |
 | Render hangs on first motion | IsaacSim init failed silently. Confirm `DISPLAY` is set and the `sonic` env activated. The renderer has a 180 s watchdog that force-exits if no per-frame heartbeat fires, so stalls do eventually self-terminate. |

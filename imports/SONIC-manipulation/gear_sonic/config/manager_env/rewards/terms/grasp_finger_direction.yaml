@@ -1,0 +1,13 @@
+# Reward for grasp based on finger direction relative to object.
+# Encourages thumb and index fingers to be on opposite sides of the object.
+# Only applied when in_contact label is True for the given hand.
+grasp_finger_direction:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:reward_grasp_finger_direction
+  weight: 0.1
+  params:
+    thumb_link: "right_hand_thumb_2_link"
+    index_link: "right_hand_index_1_link"
+    middle_link: "right_hand_middle_1_link"
+    hand: "right_hand"
+    command_name: "motion"

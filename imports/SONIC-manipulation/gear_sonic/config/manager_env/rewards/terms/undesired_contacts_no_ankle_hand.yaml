@@ -1,0 +1,14 @@
+# Basically, only ankle and hand links are allowed to contact other objects
+# Use this for manipulation tasks where hands should contact objects
+undesired_contacts_no_ankle_hand:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:undesired_contacts
+  weight: -0.1
+  params:
+    sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "contact_forces"
+      body_names:
+        # Exclude: ankles (feet), and anything containing "hand"
+        - "^(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)(?!.*hand.*).+$"
+    threshold: 1.0

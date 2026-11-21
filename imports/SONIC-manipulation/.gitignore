@@ -1,0 +1,3 @@
+# Process artifacts written into the working directory by the simulator (crash dumps, logs).
+/core
+/core.*

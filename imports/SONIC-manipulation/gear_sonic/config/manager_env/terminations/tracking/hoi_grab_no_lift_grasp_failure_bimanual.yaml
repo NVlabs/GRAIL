@@ -1,0 +1,21 @@
+# HOI ground-manipulation terminations with independent grasp-failure checks
+# for each hand that has an active reference-contact phase.
+
+defaults:
+  - terms/anchor_pos_orig@_here_
+  - terms/anchor_ori_full@_here_
+  - terms/ee_body_pos_orig@_here_
+  - terms/motion_time_out@_here_
+  - terms/object_pos_deviation@_here_
+  - terms/grasp_failure_after_contact@_here_
+  - terms/grasp_failure_after_contact_left@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.terminations.TerminationsCfg
+
+grasp_failure_after_contact:
+  params:
+    require_reference_contact_label: true
+
+grasp_failure_after_contact_left:
+  params:
+    require_reference_contact_label: true

@@ -1,0 +1,23 @@
+# Reward for fingers being close to per-hand contact center from motion data.
+# Contact center is the mean of all contact points per hand from the motion library.
+# Only applied when contact label = True (after first_contact_frame)
+
+# Right hand contact center reward
+grasp_contact_center_right:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:reward_grasp_contact_center
+  weight: 0.1
+  params:
+    hand: "right_hand"
+    command_name: "motion"
+    exp_coeff: -10.0
+
+# Left hand contact center reward (uncomment to use)
+# grasp_contact_center_left:
+#   _target_: isaaclab.managers.RewardTermCfg
+#   func: gear_sonic.envs.manager_env.mdp:reward_grasp_contact_center
+#   weight: 0.1
+#   params:
+#     hand: "left_hand"
+#     command_name: "motion"
+#     exp_coeff: -10.0

@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+from pathlib import Path
 import time
 from datetime import datetime
 
@@ -10,6 +11,19 @@ import torch
 import wandb
 from tqdm import tqdm
 from transformers import TrainerCallback
+
+from gear_sonic.trl.utils.eval_action_prefix_override import (
+    apply_zero_latent_prefix,
+    validate_zero_latent_prefix_config,
+)
+from gear_sonic.trl.utils.eval_action_sampling import (
+    DETERMINISTIC_MEAN,
+    MEAN_VS_SEEDED_SAMPLE,
+    make_per_env_generators,
+    mean_vs_seeded_sample,
+    per_env_sample_seeds,
+    validate_eval_action_sampling_config,
+)
 
 
 def create_html_table(metrics_dict):
@@ -109,7 +123,21 @@ class ImEvalCallback(TrainerCallback):
     """Callback to evaluate motion imtiation during training. Supports multigpu ."""
 
     def __init__(
-        self, eval_frequency, empty_cache_freq=20, eval_only=False, output_dir=None, log_keys=None
+        self,
+        eval_frequency,
+        empty_cache_freq=20,
+        eval_only=False,
+        output_dir=None,
+        log_keys=None,
+        prime_policy_before_loop: bool = True,
+        action_mode: str = DETERMINISTIC_MEAN,
+        action_sample_seed_base: int = 20260714,
+        action_deterministic_env_count: int = 1,
+        action_log_steps: int = 0,
+        zero_latent_prefix_motion_key: str = "",
+        zero_latent_prefix_steps: int = 0,
+        zero_latent_prefix_dim: int = 64,
+        zero_latent_prefix_expected_hand_dim: int = 2,
     ):
         super().__init__()
         self.eval_frequency = eval_frequency
@@ -119,7 +147,103 @@ class ImEvalCallback(TrainerCallback):
         self.in_eval_mode = False
         self.render_only = False
         self.log_keys = log_keys
+        self.prime_policy_before_loop = prime_policy_before_loop
+        self.action_mode = str(action_mode)
+        self.action_sample_seed_base = int(action_sample_seed_base)
+        self.action_deterministic_env_count = int(action_deterministic_env_count)
+        self.action_log_steps = int(action_log_steps)
+        self.zero_latent_prefix_motion_key = str(zero_latent_prefix_motion_key or "")
+        self.zero_latent_prefix_steps = int(zero_latent_prefix_steps)
+        self.zero_latent_prefix_dim = int(zero_latent_prefix_dim)
+        self.zero_latent_prefix_expected_hand_dim = int(
+            zero_latent_prefix_expected_hand_dim
+        )
+        self._zero_latent_prefix_enabled = False
+        self._action_sample_seeds = None
+        self._action_sample_generators = None
         self._has_object = False
+
+    def _save_debug_state_log(self):
+        if self._debug_state_records is None or not self._debug_state_log_path:
+            return
+        save_path = Path(self._debug_state_log_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(save_path), "w") as _f:
+            json.dump(self._debug_state_records, _f)
+        print(f"[DEBUG] State log: {save_path} ({len(self._debug_state_records)} steps)")
+
+    def _motion_command_cfg(self):
+        try:
+            return self.env.env.cfg.commands.motion
+        except Exception:
+            return None
+
+    def _rp2_support_diagnostic_checks(self):
+        cfg = self._motion_command_cfg()
+        if cfg is not None and not bool(
+            getattr(cfg, "enable_rp2_support_diagnostic_labels", True)
+        ):
+            return []
+
+        def _threshold(name: str, default: float) -> float:
+            return float(getattr(cfg, name, default)) if cfg is not None else default
+
+        return [
+            (
+                "rp2_object_pos_error_max/moving_support",
+                "moving_support_pos",
+                _threshold("rp2_diag_moving_support_pos_error_threshold", 0.5),
+            ),
+            (
+                "rp2_object_ori_error_max/moving_support",
+                "moving_support_ori",
+                _threshold("rp2_diag_moving_support_ori_error_threshold", 1.5),
+            ),
+            (
+                "rp2_object_height_error_max/moving_support",
+                "moving_support_height",
+                _threshold("rp2_diag_moving_support_height_error_threshold", 0.3),
+            ),
+            (
+                "rp2_object_support_contact_force/moving_support",
+                "support_force",
+                _threshold("rp2_diag_support_contact_force_threshold", 500.0),
+            ),
+            (
+                "rp2_object_support_contact_force_active/moving_support",
+                "active_support_force",
+                _threshold("rp2_diag_support_contact_force_active_threshold", 250.0),
+            ),
+            (
+                "rp2_object_support_body_pos_error/max",
+                "support_body_pos",
+                _threshold("rp2_diag_support_body_pos_error_threshold", 0.2),
+            ),
+            (
+                "rp2_object_ee_body_height_error/max",
+                "ee_body_height",
+                _threshold("rp2_diag_ee_body_height_error_threshold", 0.25),
+            ),
+        ]
+
+    def _rp2_support_diagnostic_labels(self, motion_cmd):
+        checks = self._rp2_support_diagnostic_checks()
+        if not checks:
+            return []
+        labels = [set() for _ in range(self.env.num_envs)]
+        for metric_name, label, threshold in checks:
+            value = motion_cmd.metrics.get(metric_name)
+            if not isinstance(value, torch.Tensor):
+                continue
+            metric_values = value.detach()
+            if metric_values.ndim == 0:
+                metric_values = metric_values.repeat(self.env.num_envs)
+            metric_values = metric_values.reshape(-1)
+            count = min(self.env.num_envs, metric_values.shape[0])
+            for env_id in range(count):
+                if float(metric_values[env_id].item()) > threshold:
+                    labels[env_id].add(label)
+        return ["|".join(sorted(label_set)) for label_set in labels]
 
     def on_step_end(self, args, state, control, **kwargs):
 
@@ -187,11 +311,62 @@ class ImEvalCallback(TrainerCallback):
             obs_dict = self.env.reset_all(global_rank=self.args.global_rank)
             self.model.policy.init_rollout()
 
+            validate_eval_action_sampling_config(
+                mode=self.action_mode,
+                num_envs=self.env.num_envs,
+                deterministic_env_count=self.action_deterministic_env_count,
+                log_steps=self.action_log_steps,
+            )
+            self._zero_latent_prefix_enabled = validate_zero_latent_prefix_config(
+                action_mode=self.action_mode,
+                prime_policy_before_loop=self.prime_policy_before_loop,
+                motion_key=self.zero_latent_prefix_motion_key,
+                prefix_steps=self.zero_latent_prefix_steps,
+                latent_dim=self.zero_latent_prefix_dim,
+                expected_hand_dim=self.zero_latent_prefix_expected_hand_dim,
+            )
+            if self._zero_latent_prefix_enabled:
+                print(
+                    "[EVAL_ZERO_LATENT_PREFIX] "
+                    f"motion_key={self.zero_latent_prefix_motion_key} "
+                    f"absolute_reference_steps=[0,{self.zero_latent_prefix_steps}) "
+                    f"latent_dim={self.zero_latent_prefix_dim} "
+                    f"untouched_hand_dim={self.zero_latent_prefix_expected_hand_dim} "
+                    "target=zero action_mode=deterministic_mean",
+                    flush=True,
+                )
+            if self.action_mode == MEAN_VS_SEEDED_SAMPLE:
+                if self.prime_policy_before_loop:
+                    raise ValueError(
+                        "mean_vs_seeded_sample requires prime_policy_before_loop=false "
+                        "so the first seeded sample is applied rather than discarded"
+                    )
+                self._action_sample_seeds = per_env_sample_seeds(
+                    base_seed=self.action_sample_seed_base,
+                    num_envs=self.env.num_envs,
+                    deterministic_env_count=self.action_deterministic_env_count,
+                )
+                self._action_sample_generators = make_per_env_generators(
+                    self._action_sample_seeds, device=self.env.device
+                )
+                print(
+                    "[EVAL_ACTION_DIAGNOSTIC] "
+                    f"mode={self.action_mode} num_envs={self.env.num_envs} "
+                    f"deterministic_env_count={self.action_deterministic_env_count} "
+                    f"sample_seed_base={self.action_sample_seed_base} "
+                    f"log_steps={self.action_log_steps}",
+                    flush=True,
+                )
+
             init_actions = torch.zeros(
                 self.env.num_envs, self.env.config.robot.actions_dim, device=self.env.device
             )
             actor_state.update({"obs": obs_dict, "actions": init_actions})
-            actor_state = self._pre_eval_env_step(actor_state)
+            # Legacy evaluators prime policy state before entering the rollout loop.
+            # The opt-out removes only that unused inference; the loop still computes
+            # the first action from the same reset observation immediately below.
+            if self.prime_policy_before_loop:
+                actor_state = self._pre_eval_env_step(actor_state)
 
             while not actor_state.get("end_eval", False):
                 self.env.render_results()
@@ -211,6 +386,7 @@ class ImEvalCallback(TrainerCallback):
             self.env.end_render_results()
 
             if self.render_only:
+                self._save_debug_state_log()
                 return {}
 
             metrics_eval = self._post_evaluate_policy(actor_state)
@@ -232,13 +408,7 @@ class ImEvalCallback(TrainerCallback):
             gc.collect()
             torch.cuda.empty_cache()
         if self.eval_frequency == 1:  # Exit if eval frequency is 1.
-            # Save debug state log before exit
-            if self._debug_state_records and self._debug_state_log_path:
-                save_path = Path(self._debug_state_log_path)
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(str(save_path), "w") as _f:
-                    json.dump(self._debug_state_records, _f)
-                print(f"[DEBUG] State log: {save_path} ({len(self._debug_state_records)} steps)")
+            self._save_debug_state_log()
             os._exit(0)
         return metrics_eval
 
@@ -289,12 +459,22 @@ class ImEvalCallback(TrainerCallback):
         if reset_env:
             _ = self.env.reset_all()
 
-        self.num_total_env_eval_loops = int(
-            np.ceil(
-                self.env._motion_lib._num_unique_motions
-                / (self.env.num_envs * self.args.world_size)
+        asset_compatible_eval = bool(
+            getattr(
+                getattr(self.env, "motion_command", None),
+                "use_asset_compatible_motions",
+                False,
             )
         )
+        if asset_compatible_eval:
+            self.num_total_env_eval_loops = 1
+        else:
+            self.num_total_env_eval_loops = int(
+                np.ceil(
+                    self.env._motion_lib._num_unique_motions
+                    / (self.env.num_envs * self.args.world_size)
+                )
+            )
         if "max_render_envs" in self.env.config:
             self.num_total_env_eval_loops = 1
             self.render_only = True
@@ -334,6 +514,8 @@ class ImEvalCallback(TrainerCallback):
         self.terminate_memory = []
         self.progress_memory = []
         self.terminate_reason_memory = []
+        self.rp2_diagnostic_label_state = [set() for _ in range(self.env.num_envs)]
+        self.rp2_diagnostic_reason_memory = []
         self.mpjpe, self.mpjpe_all = [], []
         self.gt_pos, self.gt_pos_all = [], []
         self.gt_rot, self.gt_rot_all = [], []
@@ -386,14 +568,14 @@ class ImEvalCallback(TrainerCallback):
     def _collect_object_tracking_errors(self):
         """Collect per-step object position and orientation errors (ref vs simulated)."""
         try:
-            from gear_sonic.envs.manager_env.mdp.utils import get_active_object
+            from gear_sonic.envs.manager_env.mdp.utils import get_target_object_current_state
 
-            obj = get_active_object(self.env.env)
             motion_cmd = self.env.motion_command
-            current_obj_pos = obj.data.root_pos_w[:, :3]  # (num_envs, 3)
-            current_obj_quat = obj.data.root_quat_w  # (num_envs, 4)
-            target_obj_pos = motion_cmd.object_root_pos[:, 0, :3]  # (num_envs, 3)
-            target_obj_quat = motion_cmd.object_root_quat[:, 0]  # (num_envs, 4)
+            current_obj_pos, current_obj_quat, _, _, valid = (
+                get_target_object_current_state(self.env.env, motion_cmd)
+            )
+            target_obj_pos = motion_cmd.target_object_root_pos
+            target_obj_quat = motion_cmd.target_object_root_quat
 
             pos_error = torch.norm(target_obj_pos - current_obj_pos, dim=-1)  # (num_envs,)
 
@@ -402,39 +584,710 @@ class ImEvalCallback(TrainerCallback):
 
             ori_error = quat_error_magnitude(target_obj_quat, current_obj_quat)  # (num_envs,)
 
-            self.obj_pos_error.append(pos_error.cpu())
-            self.obj_ori_error.append(ori_error.cpu())
+            self.obj_pos_error.append(pos_error[valid].cpu())
+            self.obj_ori_error.append(ori_error[valid].cpu())
         except (KeyError, AttributeError, IndexError):
             # Gracefully handle missing object, motion data, or shape mismatches
             pass
+
+    def _collect_rp2_object_debug_state(self, motion_cmd):
+        """Collect diagnostic-only per-object state for RP2 eval debug logs."""
+        try:
+            from gear_sonic.envs.manager_env.mdp import utils as mdp_utils
+            from isaaclab.utils.math import quat_error_magnitude
+
+            motion_lib = motion_cmd.motion_lib
+            max_objects = int(getattr(motion_lib, "max_num_objects", 1) or 1)
+            if max_objects <= 0 or not hasattr(motion_cmd, "object_root_pos"):
+                return None
+
+            env = self.env.env
+            device = motion_cmd.device
+            (
+                current_pos,
+                current_quat,
+                current_lin_vel,
+                current_ang_vel,
+                valid,
+            ) = mdp_utils.get_all_object_current_state(env, motion_cmd, max_objects=max_objects)
+            target_pos = motion_cmd.object_root_pos[:, :max_objects]
+            target_quat = motion_cmd.object_root_quat[:, :max_objects]
+            current_steps = motion_cmd.motion_start_time_steps + motion_cmd.time_steps
+
+            try:
+                target_lin_vel = motion_lib.get_object_lin_vel(
+                    motion_cmd.motion_ids, current_steps
+                )[:, :max_objects]
+            except Exception:
+                target_lin_vel = torch.zeros_like(current_lin_vel)
+            try:
+                target_ang_vel = motion_lib.get_object_ang_vel(
+                    motion_cmd.motion_ids, current_steps
+                )[:, :max_objects]
+            except Exception:
+                target_ang_vel = torch.zeros_like(current_ang_vel)
+
+            pos_error = torch.norm(target_pos - current_pos, dim=-1)
+            height_error = torch.abs(target_pos[..., 2] - current_pos[..., 2])
+            ori_error = quat_error_magnitude(
+                target_quat.reshape(-1, 4), current_quat.reshape(-1, 4)
+            ).reshape(motion_cmd.num_envs, max_objects)
+            lin_vel_error = torch.norm(target_lin_vel - current_lin_vel, dim=-1)
+            ang_vel_error = torch.norm(target_ang_vel - current_ang_vel, dim=-1)
+
+            def _mask_or_none(mask):
+                if mask is None:
+                    return None
+                mask = mask.to(device)
+                if mask.ndim == 1:
+                    mask = mask.view(-1, 1)
+                else:
+                    mask = mask.reshape(mask.shape[0], -1)
+                if mask.shape[1] < max_objects:
+                    padded = torch.zeros(
+                        motion_cmd.num_envs, max_objects, dtype=mask.dtype, device=device
+                    )
+                    padded[:, : mask.shape[1]] = mask
+                    mask = padded
+                return mask[:, :max_objects]
+
+            interaction_mask = _mask_or_none(motion_cmd.object_interaction_mask)
+            motion_mask = _mask_or_none(motion_cmd.object_motion_mask)
+            roles_by_env = motion_cmd._object_role_names_by_env(max_objects)
+            target_indices = motion_cmd.target_object_indices().detach().cpu().tolist()
+            motion_ids = motion_cmd.motion_ids.detach().cpu().tolist()
+            dynamics_by_stem = getattr(env.cfg, "object_dynamics_by_stem", {}) or {}
+            right_force = motion_cmd._multi_object_contact_force_by_sensor_key(
+                "right_hand_sensor", max_objects
+            )
+            left_force = motion_cmd._multi_object_contact_force_by_sensor_key(
+                "left_hand_sensor", max_objects
+            )
+            support_force = motion_cmd._multi_object_contact_force_by_sensor_key(
+                "support_body_sensor", max_objects
+            )
+
+            env_records = []
+            for env_idx, motion_id in enumerate(motion_ids):
+                motion_key = str(motion_lib.curr_motion_keys[int(motion_id)])
+                stems = motion_cmd._object_stems_for_motion_key(
+                    motion_key, max_objects=max_objects
+                )
+                objects = []
+                for obj_idx in range(max_objects):
+                    stem = str(stems[obj_idx]) if obj_idx < len(stems) else ""
+                    role_meta = motion_cmd._object_role_for_stem(stem) if stem else {}
+                    interaction_value = (
+                        float(interaction_mask[env_idx, obj_idx].detach().cpu())
+                        if interaction_mask is not None
+                        else None
+                    )
+                    motion_value = (
+                        float(motion_mask[env_idx, obj_idx].detach().cpu())
+                        if motion_mask is not None
+                        else None
+                    )
+                    is_valid = bool(valid[env_idx, obj_idx].detach().cpu())
+                    active_interaction = bool(
+                        is_valid
+                        and (interaction_value is None or interaction_value > 0.5)
+                    )
+                    active_motion = bool(is_valid and (motion_value is None or motion_value > 0.5))
+
+                    def _force_value(force_tensor):
+                        if force_tensor is None:
+                            return None
+                        return float(force_tensor[env_idx, obj_idx].detach().cpu())
+
+                    objects.append(
+                        {
+                            "index": int(obj_idx),
+                            "stem": stem,
+                            "role": roles_by_env[env_idx][obj_idx]
+                            if obj_idx < len(roles_by_env[env_idx])
+                            else "padding",
+                            "role_meta": role_meta,
+                            "dynamic": bool(
+                                dynamics_by_stem.get(stem, role_meta.get("dynamic", False))
+                            ),
+                            "valid": is_valid,
+                            "interaction_mask": interaction_value,
+                            "motion_mask": motion_value,
+                            "active_interaction": active_interaction,
+                            "active_motion": active_motion,
+                            "selected_target": int(obj_idx) == int(target_indices[env_idx]),
+                            "ref_pos": target_pos[env_idx, obj_idx].detach().cpu().tolist(),
+                            "sim_pos": current_pos[env_idx, obj_idx].detach().cpu().tolist(),
+                            "ref_quat": target_quat[env_idx, obj_idx].detach().cpu().tolist(),
+                            "sim_quat": current_quat[env_idx, obj_idx].detach().cpu().tolist(),
+                            "ref_lin_vel": target_lin_vel[env_idx, obj_idx]
+                            .detach()
+                            .cpu()
+                            .tolist(),
+                            "sim_lin_vel": current_lin_vel[env_idx, obj_idx]
+                            .detach()
+                            .cpu()
+                            .tolist(),
+                            "ref_ang_vel": target_ang_vel[env_idx, obj_idx]
+                            .detach()
+                            .cpu()
+                            .tolist(),
+                            "sim_ang_vel": current_ang_vel[env_idx, obj_idx]
+                            .detach()
+                            .cpu()
+                            .tolist(),
+                            "pos_error": float(pos_error[env_idx, obj_idx].detach().cpu()),
+                            "height_error": float(height_error[env_idx, obj_idx].detach().cpu()),
+                            "ori_error": float(ori_error[env_idx, obj_idx].detach().cpu()),
+                            "lin_vel_error": float(
+                                lin_vel_error[env_idx, obj_idx].detach().cpu()
+                            ),
+                            "ang_vel_error": float(
+                                ang_vel_error[env_idx, obj_idx].detach().cpu()
+                            ),
+                            "right_contact_force": _force_value(right_force),
+                            "left_contact_force": _force_value(left_force),
+                            "support_contact_force": _force_value(support_force),
+                        }
+                    )
+                env_records.append(
+                    {
+                        "env_id": int(env_idx),
+                        "motion_id": int(motion_id),
+                        "motion_key": motion_key,
+                        "target_object_index": int(target_indices[env_idx]),
+                        "objects": objects,
+                    }
+                )
+            return {"max_objects": int(max_objects), "envs": env_records}
+        except Exception as exc:
+            logger.debug(f"RP2 object debug-state skipped: {exc}")
+            return None
+
+    def _collect_active_articulation_debug_state(self, motion_cmd):
+        """Collect parent, manipulated-link, and joint state for articulated evals."""
+        try:
+            from gear_sonic.envs.manager_env.mdp import utils as mdp_utils
+            from isaaclab.utils.math import quat_error_magnitude
+
+            env = self.env.env
+            articulation = mdp_utils.get_active_articulation(env)
+            if articulation is None:
+                return None
+
+            (
+                sim_joint_pos,
+                sim_joint_vel,
+                ref_joint_pos,
+                ref_joint_vel,
+                joint_valid,
+            ) = mdp_utils.get_active_articulation_joint_tracking_state(env, motion_cmd)
+            tracked_body_index = mdp_utils.get_active_articulation_tracked_body_index(
+                env, articulation
+            )
+
+            sim_root_pos = articulation.data.root_pos_w
+            sim_root_quat = articulation.data.root_quat_w
+            sim_root_lin_vel = articulation.data.root_lin_vel_w
+            sim_root_ang_vel = articulation.data.root_ang_vel_w
+            ref_root_pos = motion_cmd.active_articulation_root_pos
+            ref_root_quat = motion_cmd.active_articulation_root_quat
+            ref_root_lin_vel = motion_cmd.active_articulation_root_lin_vel
+            ref_root_ang_vel = motion_cmd.active_articulation_root_ang_vel
+
+            sim_link_pos = articulation.data.body_pos_w[:, tracked_body_index]
+            sim_link_quat = articulation.data.body_quat_w[:, tracked_body_index]
+            sim_link_lin_vel = articulation.data.body_lin_vel_w[:, tracked_body_index]
+            sim_link_ang_vel = articulation.data.body_ang_vel_w[:, tracked_body_index]
+            # Active-articulation packs retain the manipulated source part as the
+            # sole object channel, so these are the exact tracked-link references.
+            ref_link_pos = motion_cmd.target_object_root_pos
+            ref_link_quat = motion_cmd.target_object_root_quat
+            ref_link_lin_vel = motion_cmd.target_object_lin_vel
+            ref_link_ang_vel = motion_cmd.target_object_ang_vel
+
+            root_pos_error = torch.norm(ref_root_pos - sim_root_pos, dim=-1)
+            root_ori_error = quat_error_magnitude(ref_root_quat, sim_root_quat)
+            root_lin_vel_error = torch.norm(ref_root_lin_vel - sim_root_lin_vel, dim=-1)
+            root_ang_vel_error = torch.norm(ref_root_ang_vel - sim_root_ang_vel, dim=-1)
+            link_pos_error = torch.norm(ref_link_pos - sim_link_pos, dim=-1)
+            link_ori_error = quat_error_magnitude(ref_link_quat, sim_link_quat)
+            link_lin_vel_error = torch.norm(ref_link_lin_vel - sim_link_lin_vel, dim=-1)
+            link_ang_vel_error = torch.norm(ref_link_ang_vel - sim_link_ang_vel, dim=-1)
+
+            joint_error = torch.where(
+                joint_valid,
+                sim_joint_pos - ref_joint_pos,
+                torch.zeros_like(sim_joint_pos),
+            )
+            joint_velocity_error = torch.where(
+                joint_valid,
+                sim_joint_vel - ref_joint_vel,
+                torch.zeros_like(sim_joint_vel),
+            )
+            joint_physics_tensors = {}
+            for field in (
+                "joint_stiffness",
+                "joint_damping",
+                "joint_friction_coeff",
+                "joint_dynamic_friction_coeff",
+                "joint_viscous_friction_coeff",
+                "applied_torque",
+                "computed_torque",
+            ):
+                value = getattr(articulation.data, field, None)
+                if isinstance(value, torch.Tensor):
+                    joint_physics_tensors[field] = value
+            panel_net_contact_force = None
+            panel_filtered_hand_force = None
+            sensors = getattr(env.scene, "sensors", {})
+            panel_sensor = sensors.get("object_to_hand_contact_sensor")
+            panel_sensor_data = getattr(panel_sensor, "data", None)
+            if panel_sensor_data is not None:
+                net_force = getattr(panel_sensor_data, "net_forces_w", None)
+                if isinstance(net_force, torch.Tensor):
+                    panel_net_contact_force = net_force.reshape(
+                        net_force.shape[0], -1, 3
+                    ).sum(dim=1)
+                filtered_force = getattr(panel_sensor_data, "force_matrix_w", None)
+                if isinstance(filtered_force, torch.Tensor):
+                    panel_filtered_hand_force = filtered_force.reshape(
+                        filtered_force.shape[0], -1, 3
+                    ).sum(dim=1)
+            root_dynamic = motion_cmd.active_articulation_root_dynamic_mask
+            config = getattr(env.cfg, "config", {}) or {}
+            motion_ids = motion_cmd.motion_ids.detach().cpu().tolist()
+
+            env_records = []
+            for env_idx, motion_id in enumerate(motion_ids):
+                motion_key = str(motion_cmd.motion_lib.curr_motion_keys[int(motion_id)])
+                record = {
+                        "env_id": int(env_idx),
+                        "motion_id": int(motion_id),
+                        "motion_key": motion_key,
+                        "root_dynamic": bool(root_dynamic[env_idx].detach().cpu()),
+                        "sim_root_pos": sim_root_pos[env_idx].detach().cpu().tolist(),
+                        "ref_root_pos": ref_root_pos[env_idx].detach().cpu().tolist(),
+                        "sim_root_quat": sim_root_quat[env_idx].detach().cpu().tolist(),
+                        "ref_root_quat": ref_root_quat[env_idx].detach().cpu().tolist(),
+                        "sim_root_lin_vel": sim_root_lin_vel[env_idx].detach().cpu().tolist(),
+                        "ref_root_lin_vel": ref_root_lin_vel[env_idx].detach().cpu().tolist(),
+                        "sim_root_ang_vel": sim_root_ang_vel[env_idx].detach().cpu().tolist(),
+                        "ref_root_ang_vel": ref_root_ang_vel[env_idx].detach().cpu().tolist(),
+                        "root_pos_error": float(root_pos_error[env_idx].detach().cpu()),
+                        "root_ori_error": float(root_ori_error[env_idx].detach().cpu()),
+                        "root_lin_vel_error": float(
+                            root_lin_vel_error[env_idx].detach().cpu()
+                        ),
+                        "root_ang_vel_error": float(
+                            root_ang_vel_error[env_idx].detach().cpu()
+                        ),
+                        "sim_tracked_link_pos": sim_link_pos[env_idx].detach().cpu().tolist(),
+                        "ref_tracked_link_pos": ref_link_pos[env_idx].detach().cpu().tolist(),
+                        "sim_tracked_link_quat": sim_link_quat[env_idx].detach().cpu().tolist(),
+                        "ref_tracked_link_quat": ref_link_quat[env_idx].detach().cpu().tolist(),
+                        "sim_tracked_link_lin_vel": sim_link_lin_vel[env_idx]
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "ref_tracked_link_lin_vel": ref_link_lin_vel[env_idx]
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "sim_tracked_link_ang_vel": sim_link_ang_vel[env_idx]
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "ref_tracked_link_ang_vel": ref_link_ang_vel[env_idx]
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "tracked_link_pos_error": float(
+                            link_pos_error[env_idx].detach().cpu()
+                        ),
+                        "tracked_link_ori_error": float(
+                            link_ori_error[env_idx].detach().cpu()
+                        ),
+                        "tracked_link_lin_vel_error": float(
+                            link_lin_vel_error[env_idx].detach().cpu()
+                        ),
+                        "tracked_link_ang_vel_error": float(
+                            link_ang_vel_error[env_idx].detach().cpu()
+                        ),
+                        "sim_joint_pos": sim_joint_pos[env_idx].detach().cpu().tolist(),
+                        "ref_joint_pos": ref_joint_pos[env_idx].detach().cpu().tolist(),
+                        "sim_joint_vel": sim_joint_vel[env_idx].detach().cpu().tolist(),
+                        "ref_joint_vel": ref_joint_vel[env_idx].detach().cpu().tolist(),
+                        "joint_valid": joint_valid[env_idx].detach().cpu().tolist(),
+                        "joint_position_error": joint_error[env_idx].detach().cpu().tolist(),
+                        "joint_velocity_error": joint_velocity_error[env_idx]
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                    }
+                for field, value in joint_physics_tensors.items():
+                    record[field] = value[env_idx].detach().cpu().tolist()
+                if panel_net_contact_force is not None:
+                    record["panel_net_contact_force"] = (
+                        panel_net_contact_force[env_idx].detach().cpu().tolist()
+                    )
+                if panel_filtered_hand_force is not None:
+                    record["panel_filtered_right_hand_force"] = (
+                        panel_filtered_hand_force[env_idx].detach().cpu().tolist()
+                    )
+                env_records.append(record)
+
+            return {
+                "tracked_body_name": str(
+                    config.get("active_articulation_tracked_body_name", "panel")
+                ),
+                "tracked_body_index": int(tracked_body_index),
+                "body_names": list(articulation.body_names),
+                "joint_names": list(articulation.joint_names),
+                "envs": env_records,
+            }
+        except Exception as exc:
+            logger.warning(f"Active-articulation debug-state skipped: {exc}")
+            return None
+
+    def _collect_termination_debug_state(self, dones):
+        """Return per-term masks and reasons for resets produced by this step."""
+        try:
+            manager = self.env.env.termination_manager
+            term_names = list(getattr(manager, "_term_names", []))
+            last_dones = getattr(manager, "_last_episode_dones", None)
+            if not isinstance(last_dones, torch.Tensor) or last_dones.ndim != 2:
+                return None
+
+            done_mask = dones.detach().bool().reshape(-1)
+            term_masks = {}
+            reasons = [[] for _ in range(done_mask.shape[0])]
+            for term_idx, term_name in enumerate(term_names):
+                if term_idx >= last_dones.shape[1]:
+                    break
+                values = last_dones[:, term_idx].detach().bool() & done_mask
+                term_masks[str(term_name)] = values.cpu().tolist()
+                for env_idx in values.nonzero(as_tuple=False).reshape(-1).tolist():
+                    reasons[env_idx].append(str(term_name))
+            return {
+                "term_masks": term_masks,
+                "reasons_by_env": reasons,
+            }
+        except (AttributeError, IndexError, RuntimeError):
+            return None
 
     def env_step(self, actor_state):
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
         actor_state.update({"obs": obs_dict, "rewards": rewards, "dones": dones, "extras": extras})
 
-        # Debug state logging
-        if self._debug_state_records is not None:
+        motion_cmd = None
+        rp2_diagnostic_labels = []
+        try:
             motion_cmd = self.env.env.command_manager.get_term("motion")
+            rp2_diagnostic_labels = self._rp2_support_diagnostic_labels(motion_cmd)
+            if rp2_diagnostic_labels and hasattr(self, "rp2_diagnostic_label_state"):
+                for env_id, labels in enumerate(rp2_diagnostic_labels):
+                    if labels:
+                        self.rp2_diagnostic_label_state[env_id].update(labels.split("|"))
+        except Exception:
+            motion_cmd = None
+            rp2_diagnostic_labels = []
+
+        # Debug state logging
+        if self._debug_state_records is not None and motion_cmd is not None:
+            rp2_metrics = {}
+            active_articulation_metrics = {}
+            for key, value in motion_cmd.metrics.items():
+                output = None
+                if key.startswith("rp2_"):
+                    output = rp2_metrics
+                elif key.startswith("active_articulation/"):
+                    output = active_articulation_metrics
+                if output is None:
+                    continue
+                if isinstance(value, torch.Tensor):
+                    output[key] = value.detach().cpu().tolist()
+                else:
+                    output[key] = value
+
+            # Evaluation contact metrics must not depend on whether a grasp
+            # reward term is enabled in the ablation under test.
+            try:
+                from gear_sonic.envs.manager_env.mdp import utils as mdp_utils
+
+                for side, hand, sensor_name in (
+                    ("left", "left_hand", "object_to_left_hand_contact_sensor"),
+                    ("right", "right_hand", "object_to_hand_contact_sensor"),
+                ):
+                    force = mdp_utils.get_target_object_contact_forces(
+                        self.env.env,
+                        motion_cmd,
+                        hand=hand,
+                        fallback_sensor_name=sensor_name,
+                    )
+                    if force is None:
+                        continue
+                    force_magnitude = torch.norm(force, dim=-1)
+                    rp2_metrics[f"rp2_eval_sim_contact_count/{side}"] = (
+                        (force_magnitude > 0.1)
+                        .float()
+                        .sum(dim=-1)
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+                broad_sensor = self.env.env.scene.sensors.get(
+                    "active_articulation_to_broad_hand_contact_sensor"
+                )
+                broad_force = getattr(
+                    getattr(broad_sensor, "data", None), "force_matrix_w", None
+                )
+                if isinstance(broad_force, torch.Tensor):
+                    broad_magnitude = torch.norm(broad_force, dim=-1).reshape(
+                        broad_force.shape[0], -1
+                    )
+                    rp2_metrics["rp2_eval_sim_contact_count/broad_hand"] = (
+                        (broad_magnitude > 0.1)
+                        .float()
+                        .sum(dim=-1)
+                        .detach()
+                        .cpu()
+                        .tolist()
+                    )
+            except (AttributeError, KeyError, IndexError, RuntimeError) as exc:
+                logger.debug(f"Independent RP2 eval contact logging skipped: {exc}")
+            motion_frames = motion_cmd.motion_start_time_steps + motion_cmd.time_steps
+
+            def _reference_contact(hand):
+                try:
+                    labels = motion_cmd.motion_lib.get_object_in_contact(
+                        motion_cmd.motion_ids, motion_frames, hand=hand
+                    )
+                except (AttributeError, IndexError):
+                    return None
+                if labels is None:
+                    return None
+                return labels.detach().cpu().tolist()
+
+            motion_keys = []
+            try:
+                motion_keys = [
+                    str(motion_cmd.motion_lib.curr_motion_keys[int(motion_id)])
+                    for motion_id in motion_cmd.motion_ids.detach().cpu().tolist()
+                ]
+            except Exception:
+                motion_keys = []
+            reward_components = rewards[0].detach().reshape(-1).cpu()
+            ee_termination_debug = getattr(
+                motion_cmd, "_rp2_last_ee_body_termination_debug", None
+            )
+            if isinstance(ee_termination_debug, dict):
+                ee_termination_debug = {
+                    key: (
+                        value.detach().cpu().tolist()
+                        if isinstance(value, torch.Tensor)
+                        else value
+                    )
+                    for key, value in ee_termination_debug.items()
+                }
             rec = {
                 "step": actor_state.get("step", len(self._debug_state_records)),
+                "motion_keys": motion_keys,
+                "motion_frames": motion_frames.detach().cpu().tolist(),
+                "reference_contact_left": _reference_contact("left_hand"),
+                "reference_contact_right": _reference_contact("right_hand"),
                 "root_pos": motion_cmd.robot_body_pos_w[0, 0].cpu().tolist(),
                 "root_quat": motion_cmd.robot_body_quat_w[0, 0].cpu().tolist(),
                 "ref_root_pos": motion_cmd.body_pos_w[0, 0].cpu().tolist(),
                 "ref_root_quat": motion_cmd.body_quat_w[0, 0].cpu().tolist(),
+                "body_pos": motion_cmd.robot_body_pos_w[0].detach().cpu().tolist(),
+                "ref_body_pos": motion_cmd.body_pos_w[0].detach().cpu().tolist(),
+                "body_quat": motion_cmd.robot_body_quat_w[0].detach().cpu().tolist(),
+                "ref_body_quat": motion_cmd.body_quat_w[0].detach().cpu().tolist(),
                 "joint_pos": motion_cmd.robot_joint_pos[0, :29].cpu().tolist(),
                 "ref_joint_pos": motion_cmd.joint_pos[0].cpu().tolist(),
                 "actions": actor_state["actions"][0].cpu().tolist(),
-                "reward": rewards[0].item(),
-                "done": bool(dones[0].item()) if dones.numel() > 0 else False,
+                # Keep the legacy env-0 fields above for existing analysis tools,
+                # while recording every environment for stratified failure audits.
+                "root_pos_by_env": motion_cmd.robot_body_pos_w[:, 0]
+                .detach()
+                .cpu()
+                .tolist(),
+                "root_quat_by_env": motion_cmd.robot_body_quat_w[:, 0]
+                .detach()
+                .cpu()
+                .tolist(),
+                "ref_root_pos_by_env": motion_cmd.body_pos_w[:, 0]
+                .detach()
+                .cpu()
+                .tolist(),
+                "ref_root_quat_by_env": motion_cmd.body_quat_w[:, 0]
+                .detach()
+                .cpu()
+                .tolist(),
+                "body_pos_by_env": motion_cmd.robot_body_pos_w.detach().cpu().tolist(),
+                "ref_body_pos_by_env": motion_cmd.body_pos_w.detach().cpu().tolist(),
+                "joint_pos_by_env": motion_cmd.robot_joint_pos[:, :29]
+                .detach()
+                .cpu()
+                .tolist(),
+                "ref_joint_pos_by_env": motion_cmd.joint_pos.detach().cpu().tolist(),
+                "actions_by_env": actor_state["actions"].detach().cpu().tolist(),
+                "reward": float(reward_components.mean().item()),
+                "reward_components": reward_components.tolist(),
+                "done": dones.detach().cpu().tolist() if dones.numel() > 0 else [],
+                "termination_debug": self._collect_termination_debug_state(dones),
+                "time_outs": (
+                    extras.get("time_outs").detach().cpu().tolist()
+                    if isinstance(extras.get("time_outs"), torch.Tensor)
+                    else extras.get("time_outs")
+                ),
+                "ee_body_termination_debug": ee_termination_debug,
+                "rp2_metrics": rp2_metrics,
+                "active_articulation_metrics": active_articulation_metrics,
+                "rp2_object_debug": self._collect_rp2_object_debug_state(motion_cmd),
+                "active_articulation_debug": self._collect_active_articulation_debug_state(
+                    motion_cmd
+                ),
+                "rp2_diagnostic_labels": rp2_diagnostic_labels,
             }
+            policy_action_diagnostic = actor_state.get("policy_action_diagnostic")
+            if policy_action_diagnostic is not None:
+                rec["policy_action_diagnostic"] = policy_action_diagnostic
             self._debug_state_records.append(rec)
         return actor_state
 
     def _pre_eval_env_step(self, actor_state: dict):
         dones = actor_state.get("dones", torch.zeros(self.env.num_envs, device=self.env.device))
-        actions = self.eval_policy(
-            obs_dict=actor_state["obs"], cur_dones=dones, skip_episode_attnmask=True
-        )
+        actor_state.pop("policy_action_diagnostic", None)
+        if self.action_mode == DETERMINISTIC_MEAN:
+            actions = self.eval_policy(
+                obs_dict=actor_state["obs"], cur_dones=dones, skip_episode_attnmask=True
+            )
+        elif self.action_mode == MEAN_VS_SEEDED_SAMPLE:
+            if self._action_sample_generators is None or self._action_sample_seeds is None:
+                raise RuntimeError("seeded evaluator action generators were not initialized")
+            policy = self.model.policy
+            if not hasattr(policy, "_update_obs_buffer") or not hasattr(
+                policy, "update_distribution"
+            ):
+                raise RuntimeError(
+                    "mean_vs_seeded_sample requires a rollout policy exposing "
+                    "_update_obs_buffer and update_distribution"
+                )
+            episode_attnmask = policy._update_obs_buffer(
+                actor_state["obs"], None, dones
+            )
+            policy.update_distribution(
+                obs_dict=policy.obs_dict_buffer,
+                episode_attnmask=episode_attnmask,
+                last_step_only=True,
+                skip_episode_attnmask=True,
+            )
+            policy.steps += 1
+            action_mean = policy.action_mean.detach()
+            action_std = policy.action_std.detach()
+            actions = mean_vs_seeded_sample(
+                action_mean,
+                action_std,
+                deterministic_env_count=self.action_deterministic_env_count,
+                generators=self._action_sample_generators,
+            )
+            action_step = int(actor_state.get("step", 0))
+            if action_step < self.action_log_steps:
+                expanded_std = torch.broadcast_to(action_std, action_mean.shape)
+                actor_state["policy_action_diagnostic"] = {
+                    "mode": self.action_mode,
+                    "action_step": action_step,
+                    "deterministic_env_count": self.action_deterministic_env_count,
+                    "sample_seed_base": self.action_sample_seed_base,
+                    "envs": [
+                        {
+                            "env_id": env_id,
+                            "action_mode": (
+                                DETERMINISTIC_MEAN
+                                if env_id < self.action_deterministic_env_count
+                                else "fixed_seed_sample"
+                            ),
+                            "sample_seed": self._action_sample_seeds[env_id],
+                            "sample_index": (
+                                None
+                                if env_id < self.action_deterministic_env_count
+                                else action_step
+                            ),
+                            "action_mean": action_mean[env_id].cpu().tolist(),
+                            "action_std": expanded_std[env_id].cpu().tolist(),
+                            "action": actions[env_id].detach().cpu().tolist(),
+                            "sample_delta_l2": float(
+                                torch.linalg.vector_norm(
+                                    actions[env_id] - action_mean[env_id]
+                                ).item()
+                            ),
+                        }
+                        for env_id in range(self.env.num_envs)
+                    ],
+                }
+        else:
+            raise RuntimeError(f"unhandled eval action mode {self.action_mode!r}")
+
+        if self._zero_latent_prefix_enabled:
+            motion_cmd = self.env.motion_command
+            if motion_cmd is None or motion_cmd.motion_lib is None:
+                raise RuntimeError(
+                    "zero-latent prefix requires a motion command and motion library"
+                )
+            reference_steps = motion_cmd.motion_start_time_steps + motion_cmd.time_steps
+            original_actions = actions.detach().clone()
+            actions, intervention_mask, target_motion_id = apply_zero_latent_prefix(
+                actions,
+                motion_ids=motion_cmd.motion_ids,
+                reference_steps=reference_steps,
+                motion_keys=list(motion_cmd.motion_lib.curr_motion_keys),
+                target_motion_key=self.zero_latent_prefix_motion_key,
+                prefix_steps=self.zero_latent_prefix_steps,
+                latent_dim=self.zero_latent_prefix_dim,
+                expected_hand_dim=self.zero_latent_prefix_expected_hand_dim,
+            )
+            applied_env_ids = intervention_mask.nonzero(as_tuple=False).reshape(-1).tolist()
+            if applied_env_ids:
+                latent_dim = self.zero_latent_prefix_dim
+                actor_state["policy_action_diagnostic"] = {
+                    "mode": "deterministic_mean_zero_latent_prefix",
+                    "action_step": int(actor_state.get("step", 0)),
+                    "target_motion_key": self.zero_latent_prefix_motion_key,
+                    "target_motion_id": int(target_motion_id),
+                    "prefix_absolute_reference_steps": [
+                        0,
+                        self.zero_latent_prefix_steps,
+                    ],
+                    "latent_dim": latent_dim,
+                    "untouched_hand_dim": self.zero_latent_prefix_expected_hand_dim,
+                    "target": "zero_residual_latent",
+                    "object_or_contact_reference_modified": False,
+                    "envs": [
+                        {
+                            "env_id": int(env_id),
+                            "absolute_reference_step": int(reference_steps[env_id].item()),
+                            "original_action_mean": original_actions[env_id].cpu().tolist(),
+                            "applied_action": actions[env_id].detach().cpu().tolist(),
+                            "original_latent_l2": float(
+                                torch.linalg.vector_norm(
+                                    original_actions[env_id, :latent_dim]
+                                ).item()
+                            ),
+                            "applied_latent_l2": float(
+                                torch.linalg.vector_norm(actions[env_id, :latent_dim]).item()
+                            ),
+                            "hand_outputs_unchanged": bool(
+                                torch.equal(
+                                    original_actions[env_id, latent_dim:],
+                                    actions[env_id, latent_dim:],
+                                )
+                            ),
+                        }
+                        for env_id in applied_env_ids
+                    ],
+                }
         actor_state.update({"actions": actions})
         return actor_state
 
@@ -533,13 +1386,34 @@ class ImEvalCallback(TrainerCallback):
                 self.steps_pbar.refresh()
 
         self.curr_steps += 1
-        if self.curr_steps >= curr_max or self.terminate_state.sum() == self.env.num_envs:
+        max_render_steps = 0
+        if self.render_only:
+            try:
+                max_render_steps = int(self.env.config.get("max_render_steps", 0))
+            except Exception:
+                max_render_steps = 0
+        reached_render_cap = max_render_steps > 0 and self.curr_steps >= max_render_steps
+        if reached_render_cap:
+            logger.info(
+                f"Reached render-only max_render_steps={max_render_steps}; closing partial eval videos."
+            )
+
+        if (
+            self.curr_steps >= curr_max
+            or self.terminate_state.sum() == self.env.num_envs
+            or reached_render_cap
+        ):
             if self.steps_pbar is not None:
                 self.steps_pbar.close()
                 self.steps_pbar = None
 
             self.terminate_memory.append(self.terminate_state.cpu().numpy())
             self.terminate_reason_memory.extend(self.terminate_reason)
+            diag_reasons = [
+                "|".join(sorted(label_set)) for label_set in self.rp2_diagnostic_label_state
+            ]
+            self.rp2_diagnostic_reason_memory.extend(diag_reasons)
+            self.rp2_diagnostic_label_state = [set() for _ in range(self.env.num_envs)]
             self.progress_memory.append(
                 (
                     self.progress_state
@@ -640,6 +1514,7 @@ class ImEvalCallback(TrainerCallback):
                         for m in batch
                     ]
                     reasons = self.terminate_reason_memory
+                    diag_reasons = self.rp2_diagnostic_reason_memory
 
                     print("Rendering only. Reached the end of the evaluation loop.", flush=True)
                     success_rate = 1 - terminate_hist[:num_unique].mean()
@@ -652,9 +1527,10 @@ class ImEvalCallback(TrainerCallback):
                         p = float(progress_hist[idx])
                         mpjpe_str = f"{mpjpe_flat[idx]:.1f}" if idx < len(mpjpe_flat) else "N/A"
                         reason = reasons[idx] if idx < len(reasons) else ""
+                        diag = diag_reasons[idx] if idx < len(diag_reasons) else ""
                         status = "FAIL" if t else "OK"
                         print(
-                            f"MOTION_RESULT: {key} status={status} progress={p:.3f} mpjpe={mpjpe_str} reason={reason}",
+                            f"MOTION_RESULT: {key} status={status} progress={p:.3f} mpjpe={mpjpe_str} reason={reason} diag={diag}",
                             flush=True,
                         )
 
@@ -911,6 +1787,9 @@ class ImEvalCallback(TrainerCallback):
                 all_metrics_dict["terminate_reason"] = self.terminate_reason_memory[
                     : len(gathered_terminate_hist_stack)
                 ]
+                all_metrics_dict["rp2_diagnostic_reason"] = self.rp2_diagnostic_reason_memory[
+                    : len(gathered_terminate_hist_stack)
+                ]
                 all_metrics_dict["progress"] = gathered_progress_hist_stack.cpu().numpy()
                 all_metrics_dict["motion_keys"] = self.env._motion_lib._motion_data_keys[
                     gathered_motion_idxes.cpu().numpy()
@@ -971,14 +1850,16 @@ class ImEvalCallback(TrainerCallback):
                     _mt = all_metrics_dict.get("terminated", [])
                     _mp = all_metrics_dict.get("progress", [])
                     _mr = all_metrics_dict.get("terminate_reason", [])
+                    _md = all_metrics_dict.get("rp2_diagnostic_reason", [])
                     _mm = all_metrics_dict.get("mpjpe_g", [])
                     for _i in range(len(_mk)):
                         _status = "FAIL" if (_i < len(_mt) and _mt[_i]) else "OK"
                         _prog = f"{_mp[_i]:.3f}" if _i < len(_mp) else "N/A"
                         _mpjpe = f"{_mm[_i]:.1f}" if _i < len(_mm) else "N/A"
                         _reason = _mr[_i] if _i < len(_mr) else ""
+                        _diag = _md[_i] if _i < len(_md) else ""
                         print(
-                            f"MOTION_RESULT: {_mk[_i]} status={_status} progress={_prog} mpjpe={_mpjpe} reason={_reason}",
+                            f"MOTION_RESULT: {_mk[_i]} status={_status} progress={_prog} mpjpe={_mpjpe} reason={_reason} diag={_diag}",
                             flush=True,
                         )
 

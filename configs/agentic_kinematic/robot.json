@@ -1,0 +1,25 @@
+{
+  "model_xml": "../../imports/GMR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml",
+  "trajectory": "../../data/agentic_example/selected_pair_native_g1.npz",
+  "object_mesh": "../../data/agentic_example/original_object_mesh.npz",
+  "targets": "../../data/agentic_example/reviewed_robot_targets.npz",
+  "expected_input_sha256": {},
+  "editable_joints": [
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+    "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+    "left_hand_thumb_0_joint", "left_hand_thumb_1_joint", "left_hand_thumb_2_joint",
+    "left_hand_middle_0_joint", "left_hand_middle_1_joint", "left_hand_index_0_joint", "left_hand_index_1_joint",
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+    "right_hand_thumb_0_joint", "right_hand_thumb_1_joint", "right_hand_thumb_2_joint",
+    "right_hand_middle_0_joint", "right_hand_middle_1_joint", "right_hand_index_0_joint", "right_hand_index_1_joint"
+  ],
+  "max_delta_rad": 0.15,
+  "joint_caps": {"floor": [2.0, 40.0, 1500.0], "slack": [0.2, 5.0, 100.0], "reference_multiplier": 1.0},
+  "wrist_linear_caps": {"floor": [0.25, 3.0, 80.0], "slack": [0.05, 0.5, 10.0], "reference_multiplier": 1.0},
+  "wrist_angular_caps": {"floor": [0.5, 8.0, 200.0], "slack": [0.1, 1.0, 20.0], "reference_multiplier": 1.0},
+  "temporal_scales": [1.0, 20.0, 500.0],
+  "weights": {"pose": 1.0, "wrist_position": 1000.0, "wrist_orientation": 1.0, "contact_position": 1000.0, "contact_normal": 1.0, "joint_temporal": 10.0},
+  "max_iterations": 100,
+  "max_feasibility_backtracks": 20
+}

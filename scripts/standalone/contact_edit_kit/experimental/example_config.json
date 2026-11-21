@@ -1,0 +1,46 @@
+{
+  "_example_notice": "ILLUSTRATIVE SCHEMA ONLY: supply original inputs and author the window, protected keys, contact phases and tolerances for your selected G1 motion before preflight.",
+  "native": "inputs/selected_native.npz",
+  "descriptor": "inputs/material_contacts.json",
+  "model_xml": "inputs/robot/g1_mocap_29dof_with_hands.xml",
+  "window": [
+    48,
+    72
+  ],
+  "protected_keys": [
+    48,
+    49,
+    53,
+    57,
+    61,
+    65,
+    69,
+    71,
+    72
+  ],
+  "sides": [
+    "left",
+    "right"
+  ],
+  "task_multiplier": 5.0,
+  "target_mode": "wrist_finger_fk",
+  "object_mesh": "inputs/original_object_mesh.npz",
+  "model_snapshot": "inputs/model_snapshot.npz",
+  "contact_constraints": {
+    "enabled": true,
+    "reference": "selected_parent_native_linear_at_matching_time",
+    "sample_step_frames": 0.25,
+    "review_window": [
+      47,
+      73
+    ],
+    "gap_allowance_m": 0.0005,
+    "normal_allowance_deg": 2.0,
+    "active_pads_only": true,
+    "fixed_original_material_anchors": true,
+    "retain_inherited_contact_errors": true,
+    "interior_gap_allowance_m": 0.00045,
+    "interior_normal_allowance_deg": 1.8,
+    "extra_constraint_frames": []
+  }
+}

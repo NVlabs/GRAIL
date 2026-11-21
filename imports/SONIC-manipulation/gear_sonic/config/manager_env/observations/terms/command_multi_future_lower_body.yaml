@@ -1,0 +1,5 @@
+command_multi_future_lower_body:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:command_multi_future_lower_body
+  params:
+    command_name: "motion"

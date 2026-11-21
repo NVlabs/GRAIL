@@ -149,6 +149,13 @@ class PolicyCfg(ObsGroup):
     table_ori_b = None
     # BPS object shape encoding (static per object, no noise)
     object_bps = None
+    # RP2 full-scene multi-object observations.
+    object_valid_mask = None
+    object_ref_state_b = None
+    object_ref_state_b_multi_future = None
+    object_bps_all = None
+    active_articulation_joint_state = None
+    active_articulation_joint_future = None
 
     # Policy output from last step (latent residual + primitives, e.g., 64+2=66 dims)
     last_meta_action = None
@@ -337,6 +344,13 @@ class PrivilegedCfg(ObsGroup):
     # Object-to-root observations (current state in body frame)
     object_pos_b = None
     object_ori_b_6d = None
+    # RP2 full-scene multi-object observations.
+    object_valid_mask = None
+    object_ref_state_b = None
+    object_ref_state_b_multi_future = None
+    object_bps_all = None
+    active_articulation_joint_state = None
+    active_articulation_joint_future = None
     # Table observations
     table_pos_b = None
     table_ori_b = None
@@ -423,6 +437,10 @@ class TokenizerCfg(ObsGroup):
     object_pos_b = None
     object_ori_b = None
     object_ori_b_6d = None
+    object_valid_mask = None
+    object_ref_state_b = None
+    object_ref_state_b_multi_future = None
+    object_bps_all = None
     ref_root_pos_future_b = None
     ref_root_ori_future_b = None
     diff_body_pos_future_local = None
@@ -1044,9 +1062,8 @@ def object_pos_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
-    # object_root_pos is (num_envs, num_objects, 3) - take first object
-    object_pos_w = command.object_root_pos[:, 0]  # (num_envs, 3)
-    object_quat_w = command.object_root_quat[:, 0]  # (num_envs, 4)
+    object_pos_w = command.target_object_root_pos
+    object_quat_w = command.target_object_root_quat
 
     pos_b, _ = subtract_frame_transforms(
         command.robot_anchor_pos_w,  # Robot anchor (pelvis) position
@@ -1069,7 +1086,258 @@ def object_bps(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
             Returns zeros if no BPS file was loaded.
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
-    return command.object_bps
+    return command.target_object_bps
+
+
+def object_interaction_mask(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Per-object reference interaction mask, shape (num_envs, num_objects)."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    mask = command.object_interaction_mask
+    if mask is None:
+        max_objects = int(getattr(command.motion_lib, "max_num_objects", 1) or 1)
+        return torch.zeros(env.num_envs, max_objects, device=env.device)
+    return mask
+
+
+def object_motion_mask(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Per-object motion-derived activity mask, shape (num_envs, num_objects)."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    mask = command.object_motion_mask
+    if mask is None:
+        max_objects = int(getattr(command.motion_lib, "max_num_objects", 1) or 1)
+        return torch.zeros(env.num_envs, max_objects, device=env.device)
+    return mask
+
+
+def _max_num_objects(command: commands.TrackingCommand) -> int:
+    return int(getattr(command.motion_lib, "max_num_objects", 1) or 1)
+
+
+def _object_valid_mask(command: commands.TrackingCommand) -> torch.Tensor:
+    """Return a padded per-env object-valid mask in motion/USD order."""
+    max_objects = _max_num_objects(command)
+    if max_objects <= 1:
+        return torch.ones(command.num_envs, 1, device=command.device)
+
+    cached = getattr(command, "_object_valid_mask_cache", None)
+    if (
+        cached is not None
+        and cached.shape == (command.num_envs, max_objects)
+        and cached.device == command.device
+    ):
+        return cached.float()
+
+    valid = torch.zeros(command.num_envs, max_objects, device=command.device)
+    motion_ids = command.motion_ids.detach().cpu().tolist()
+    for env_idx, motion_id in enumerate(motion_ids):
+        motion_key = command.motion_lib.curr_motion_keys[int(motion_id)]
+        if hasattr(command, "_object_stems_for_motion_key"):
+            stems = command._object_stems_for_motion_key(  # noqa: SLF001
+                motion_key, max_objects=max_objects
+            )
+            count = len(stems)
+        else:
+            count = max_objects
+        if count <= 0:
+            count = max_objects
+        valid[env_idx, : min(max_objects, count)] = 1.0
+    return valid
+
+
+def _object_mask_or_zeros(
+    command: commands.TrackingCommand,
+    mask: torch.Tensor | None,
+    shape: tuple[int, ...],
+) -> torch.Tensor:
+    if mask is None:
+        return torch.zeros(*shape, device=command.device)
+    mask = mask.float().to(command.device)
+    expected = 1
+    for dim in shape:
+        expected *= int(dim)
+    if mask.numel() == expected:
+        return mask.view(*shape)
+    if len(shape) == 2 and mask.shape == (shape[0],):
+        return mask.view(shape[0], 1).expand(*shape)
+
+    out = torch.zeros(*shape, device=command.device)
+    flat_mask = mask.reshape(shape[0], -1)
+    count = min(flat_mask.shape[1], shape[-1])
+    out[:, :count] = flat_mask[:, :count]
+    return out
+
+
+def _future_object_mask_or_zeros(
+    command: commands.TrackingCommand,
+    mask_name: str,
+) -> torch.Tensor:
+    max_objects = _max_num_objects(command)
+    getter = getattr(command.motion_lib, f"get_{mask_name}", None)
+    if getter is None:
+        return torch.zeros(
+            command.num_envs, command.num_future_frames, max_objects, device=command.device
+        )
+    mask = getter(command.future_motion_ids, command.future_time_steps)
+    if mask is None:
+        return torch.zeros(
+            command.num_envs, command.num_future_frames, max_objects, device=command.device
+        )
+    return mask.float().to(command.device).view(
+        command.num_envs, command.num_future_frames, max_objects
+    )
+
+
+def object_valid_mask(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Padded object-valid mask, shape ``(num_envs, max_num_objects)``."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    return _object_valid_mask(command)
+
+
+def object_ref_state_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Flattened per-object current reference state in the robot anchor frame.
+
+    Per object token layout:
+    ``[valid, interaction_mask, motion_mask, pos_b(3), ori_b_6d(6), lin_vel_b(3), ang_vel_b(3)]``.
+    """
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    max_objects = _max_num_objects(command)
+
+    object_pos_w = command.object_root_pos
+    object_quat_w = command.object_root_quat
+    robot_pos_w = command.robot_anchor_pos_w[:, None, :].expand(-1, max_objects, -1)
+    robot_quat_w = command.robot_anchor_quat_w[:, None, :].expand(-1, max_objects, -1)
+
+    pos_b, ori_b = subtract_frame_transforms(
+        robot_pos_w.reshape(-1, 3),
+        robot_quat_w.reshape(-1, 4),
+        object_pos_w.reshape(-1, 3),
+        object_quat_w.reshape(-1, 4),
+    )
+    pos_b = pos_b.view(env.num_envs, max_objects, 3)
+    ori_6d = matrix_from_quat(ori_b).view(env.num_envs, max_objects, 3, 3)[
+        ..., :2
+    ].reshape(env.num_envs, max_objects, 6)
+
+    current_steps = command.motion_start_time_steps + command.time_steps
+    try:
+        lin_vel_w = command.motion_lib.get_object_lin_vel(command.motion_ids, current_steps)
+        ang_vel_w = command.motion_lib.get_object_ang_vel(command.motion_ids, current_steps)
+    except Exception:  # noqa: BLE001
+        lin_vel_w = torch.zeros(env.num_envs, max_objects, 3, device=env.device)
+        ang_vel_w = torch.zeros(env.num_envs, max_objects, 3, device=env.device)
+
+    robot_quat_inv = quat_inv(robot_quat_w.reshape(-1, 4))
+    lin_vel_b = quat_apply(robot_quat_inv, lin_vel_w.reshape(-1, 3)).view(
+        env.num_envs, max_objects, 3
+    )
+    ang_vel_b = quat_apply(robot_quat_inv, ang_vel_w.reshape(-1, 3)).view(
+        env.num_envs, max_objects, 3
+    )
+
+    valid = _object_valid_mask(command)
+    interaction = _object_mask_or_zeros(
+        command, command.object_interaction_mask, (env.num_envs, max_objects)
+    )
+    motion = _object_mask_or_zeros(command, command.object_motion_mask, (env.num_envs, max_objects))
+    state = torch.cat(
+        [
+            valid[..., None],
+            interaction[..., None],
+            motion[..., None],
+            pos_b,
+            ori_6d,
+            lin_vel_b,
+            ang_vel_b,
+        ],
+        dim=-1,
+    )
+    state = state * valid[..., None]
+    return state.reshape(env.num_envs, -1)
+
+
+def object_ref_state_b_multi_future(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Flattened per-object future reference state in the current robot anchor frame.
+
+    Per future/object token layout:
+    ``[valid, interaction_mask, motion_mask, pos_b(3), ori_b_6d(6)]``.
+    """
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    max_objects = _max_num_objects(command)
+    num_future = command.num_future_frames
+
+    object_pos_w = command.object_root_pos_multi_future
+    object_quat_w = command.object_root_quat_multi_future
+    robot_pos_w = command.robot_anchor_pos_w[:, None, None, :].expand(
+        -1, num_future, max_objects, -1
+    )
+    robot_quat_w = command.robot_anchor_quat_w[:, None, None, :].expand(
+        -1, num_future, max_objects, -1
+    )
+
+    pos_b, ori_b = subtract_frame_transforms(
+        robot_pos_w.reshape(-1, 3),
+        robot_quat_w.reshape(-1, 4),
+        object_pos_w.reshape(-1, 3),
+        object_quat_w.reshape(-1, 4),
+    )
+    pos_b = pos_b.view(env.num_envs, num_future, max_objects, 3)
+    ori_6d = matrix_from_quat(ori_b).view(env.num_envs, num_future, max_objects, 3, 3)[
+        ..., :2
+    ].reshape(env.num_envs, num_future, max_objects, 6)
+
+    valid = _object_valid_mask(command)[:, None, :].expand(-1, num_future, -1)
+    interaction = _future_object_mask_or_zeros(command, "object_interaction_mask")
+    motion = _future_object_mask_or_zeros(command, "object_motion_mask")
+    state = torch.cat(
+        [
+            valid[..., None],
+            interaction[..., None],
+            motion[..., None],
+            pos_b,
+            ori_6d,
+        ],
+        dim=-1,
+    )
+    state = state * valid[..., None]
+    return state.reshape(env.num_envs, -1)
+
+
+def object_bps_all(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Flattened per-object BPS features in motion/USD order."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    max_objects = _max_num_objects(command)
+    if max_objects <= 1:
+        return command.object_bps
+
+    cached = getattr(command, "_object_bps_all_cache", None)
+    if cached is not None and cached.shape[:2] == (env.num_envs, max_objects):
+        return cached.reshape(env.num_envs, -1)
+
+    bps_lookup = getattr(command.motion_lib, "_bps_lookup", None) or {}
+    bps_dim = int(getattr(command.motion_lib, "_bps_dim", 0) or 0)
+    if bps_dim <= 0:
+        bps = command.motion_lib.get_object_bps(command.motion_ids)
+        if bps.ndim == 3 and bps.shape[1] == max_objects:
+            return bps.reshape(env.num_envs, -1)
+        return torch.zeros(env.num_envs, max_objects, 1, device=env.device).reshape(
+            env.num_envs, -1
+        )
+
+    out = torch.zeros(env.num_envs, max_objects, bps_dim, device=env.device)
+    motion_ids = command.motion_ids.detach().cpu().tolist()
+    for env_idx, motion_id in enumerate(motion_ids):
+        motion_key = command.motion_lib.curr_motion_keys[int(motion_id)]
+        stems = command._object_stems_for_motion_key(  # noqa: SLF001
+            motion_key, max_objects=max_objects
+        )
+        for obj_idx, stem in enumerate(stems[:max_objects]):
+            vec = bps_lookup.get(stem)
+            if vec is not None:
+                out[env_idx, obj_idx] = torch.as_tensor(
+                    vec, dtype=torch.float32, device=env.device
+                )
+    out = out * _object_valid_mask(command)[..., None]
+    return out.reshape(env.num_envs, -1)
 
 
 def object_ori_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
@@ -1083,8 +1351,8 @@ def object_ori_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
-    object_pos_w = command.object_root_pos[:, 0]
-    object_quat_w = command.object_root_quat[:, 0]
+    object_pos_w = command.target_object_root_pos
+    object_quat_w = command.target_object_root_quat
 
     _, ori_b = subtract_frame_transforms(
         command.robot_anchor_pos_w,
@@ -1107,8 +1375,8 @@ def object_ori_b_6d(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
-    object_pos_w = command.object_root_pos[:, 0]
-    object_quat_w = command.object_root_quat[:, 0]
+    object_pos_w = command.target_object_root_pos
+    object_quat_w = command.target_object_root_quat
 
     _, ori_b = subtract_frame_transforms(
         command.robot_anchor_pos_w,
@@ -1134,10 +1402,7 @@ def object_pos_b_multi_future(
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
-    # object_root_pos_multi_future is (num_envs, num_future_frames, num_objects, 3)
-    object_pos_w = command.object_root_pos_multi_future[
-        :, :, 0, :
-    ]  # (num_envs, num_future_frames, 3)
+    object_pos_w = command.target_object_root_pos_multi_future
 
     # Transform to body frame using robot anchor
     # Expand robot anchor to match future frames
@@ -1221,10 +1486,7 @@ def object_ori_b_multi_future(env: ManagerBasedEnv, command_name: str) -> torch.
     """
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
-    # object_root_quat_multi_future is (num_envs, num_future_frames, num_objects, 4)
-    object_quat_w = command.object_root_quat_multi_future[
-        :, :, 0, :
-    ]  # (num_envs, num_future_frames, 4)
+    object_quat_w = command.target_object_root_quat_multi_future
 
     # Get robot anchor orientation expanded to match
     robot_anchor_quat = command.robot_anchor_quat_w[:, None, :].expand(
@@ -1255,13 +1517,10 @@ def object_pos_delta_multi_future(env: ManagerBasedEnv, command_name: str) -> to
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
     # Get SIMULATED current object position (where it actually is)
-    obj = utils.get_active_object(env)
-    object_pos_current_w = obj.data.root_pos_w  # (num_envs, 3)
+    object_pos_current_w, _, _, _, _ = utils.get_target_object_current_state(env, command)
 
     # Get REFERENCE future object positions (where it should go)
-    object_pos_future_w = command.object_root_pos_multi_future[
-        :, :, 0, :
-    ]  # (num_envs, num_future_frames, 3)
+    object_pos_future_w = command.target_object_root_pos_multi_future
 
     # Get robot anchor for body frame transform
     robot_anchor_pos = command.robot_anchor_pos_w
@@ -1308,13 +1567,10 @@ def object_ori_delta_multi_future_6d(env: ManagerBasedEnv, command_name: str) ->
     command: commands.TrackingCommand = env.command_manager.get_term(command_name)
 
     # Get SIMULATED current object orientation (where it actually is)
-    obj = utils.get_active_object(env)
-    object_quat_current_w = obj.data.root_quat_w  # (num_envs, 4)
+    _, object_quat_current_w, _, _, _ = utils.get_target_object_current_state(env, command)
 
     # Get REFERENCE future object orientations (where it should go)
-    object_quat_future_w = command.object_root_quat_multi_future[
-        :, :, 0, :
-    ]  # (num_envs, num_future_frames, 4)
+    object_quat_future_w = command.target_object_root_quat_multi_future
 
     # Compute delta: q_simulated_current^{-1} * q_reference_future
     object_quat_current_inv = quat_inv(object_quat_current_w)  # (num_envs, 4)
@@ -1331,6 +1587,68 @@ def object_ori_delta_multi_future_6d(env: ManagerBasedEnv, command_name: str) ->
     ori_6d = mat[..., :2].reshape(env.num_envs, command.num_future_frames, 6)
 
     return ori_6d.reshape(env.num_envs, -1)  # (num_envs, num_future_frames * 6)
+
+
+def active_entity_base_pos_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Reference base position for the one active rigid or articulated entity."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    pos_b, _ = subtract_frame_transforms(
+        command.robot_anchor_pos_w,
+        command.robot_anchor_quat_w,
+        command.active_entity_root_pos,
+        command.active_entity_root_quat,
+    )
+    return pos_b
+
+
+def active_entity_base_ori_b_6d(
+    env: ManagerBasedEnv, command_name: str
+) -> torch.Tensor:
+    """Reference base orientation for the active entity in the robot frame."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    _, ori_b = subtract_frame_transforms(
+        command.robot_anchor_pos_w,
+        command.robot_anchor_quat_w,
+        command.active_entity_root_pos,
+        command.active_entity_root_quat,
+    )
+    return matrix_from_quat(ori_b)[..., :2].reshape(env.num_envs, 6)
+
+
+def active_entity_base_pos_delta_multi_future(
+    env: ManagerBasedEnv, command_name: str
+) -> torch.Tensor:
+    """Future reference base position minus current simulated base position."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    current_pos_w, _, _, _, _ = utils.get_active_entity_base_current_state(env, command)
+    future_pos_w = command.active_entity_root_pos_multi_future
+    anchor_pos_w = command.robot_anchor_pos_w
+    anchor_quat_inv = quat_inv(command.robot_anchor_quat_w)
+
+    current_pos_b = quat_apply(anchor_quat_inv, current_pos_w - anchor_pos_w)
+    future_pos_b = quat_apply(
+        anchor_quat_inv[:, None, :]
+        .expand(-1, command.num_future_frames, -1)
+        .reshape(-1, 4),
+        (future_pos_w - anchor_pos_w[:, None, :]).reshape(-1, 3),
+    ).reshape(env.num_envs, command.num_future_frames, 3)
+    return (future_pos_b - current_pos_b[:, None, :]).reshape(env.num_envs, -1)
+
+
+def active_entity_base_ori_delta_multi_future_6d(
+    env: ManagerBasedEnv, command_name: str
+) -> torch.Tensor:
+    """Future reference base rotation relative to the simulated active base."""
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    _, current_quat_w, _, _, _ = utils.get_active_entity_base_current_state(env, command)
+    future_quat_w = command.active_entity_root_quat_multi_future
+    relative = quat_mul(
+        quat_inv(current_quat_w)[:, None, :]
+        .expand(-1, command.num_future_frames, -1)
+        .reshape(-1, 4),
+        future_quat_w.reshape(-1, 4),
+    )
+    return matrix_from_quat(relative)[..., :2].reshape(env.num_envs, -1)
 
 
 def table_pos_b(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
@@ -2801,13 +3119,17 @@ def get_target_object_pos_in_base_frame(
     env: ManagerBasedEnv, asset_cfg: SceneEntityCfg
 ) -> torch.Tensor:
     """Get object position in robot base frame."""
-    if asset_cfg.name == "object" and "object" not in env.scene.rigid_objects:
-        asset = get_active_object(env)
+    if (
+        asset_cfg.name == "active_articulation"
+        or (asset_cfg.name == "object" and "object" not in env.scene.rigid_objects)
+    ):
+        command: commands.TrackingCommand = env.command_manager.get_term("motion")
+        obj_pos_w, _, _, _, _ = utils.get_target_object_current_state(env, command)
     else:
         asset = env.scene[asset_cfg.name]
+        obj_pos_w = asset.data.root_pos_w
     robot = env.scene["robot"]
 
-    obj_pos_w = asset.data.root_pos_w
     robot_pos_w = robot.data.root_pos_w
     robot_quat_w = robot.data.root_quat_w
 
@@ -2816,6 +3138,125 @@ def get_target_object_pos_in_base_frame(
     obj_pos_b = quat_apply(quat_inv(robot_quat_w), obj_pos_rel)
 
     return obj_pos_b
+
+
+def active_articulation_joint_state(
+    env: ManagerBasedEnv,
+    command_name: str = "motion",
+    max_joints: int = 4,
+    velocity_scale: float = 0.1,
+    normalize_by_joint_limits: bool = False,
+) -> torch.Tensor:
+    """Return padded ``q``, scaled ``qdot``, reference error, and a validity mask.
+
+    This term is intentionally opt-in. Its fixed width lets a versioned policy
+    mix mechanisms with different joint counts without enabling RP2's padded
+    world-object observation path.
+    """
+    if max_joints <= 0:
+        raise ValueError(f"max_joints must be positive, got {max_joints}")
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    joint_pos, joint_vel, reference_pos, _, joint_valid = (
+        utils.get_active_articulation_joint_tracking_state(env, command)
+    )
+    num_joints = joint_pos.shape[1]
+    if num_joints > max_joints:
+        raise ValueError(
+            "Active articulation exceeds the configured observation capacity: "
+            f"usd={num_joints}, max_joints={max_joints}"
+        )
+
+    output = torch.zeros(
+        env.num_envs,
+        4,
+        max_joints,
+        dtype=joint_pos.dtype,
+        device=joint_pos.device,
+    )
+    joint_valid_float = joint_valid.to(dtype=joint_pos.dtype)
+    if normalize_by_joint_limits and num_joints:
+        articulation = utils.get_active_articulation(env)
+        limits = articulation.data.soft_joint_pos_limits
+        center = 0.5 * (limits[..., 0] + limits[..., 1])
+        half_range = 0.5 * (limits[..., 1] - limits[..., 0]).clamp_min(1e-3)
+        normalized_pos = (joint_pos - center) / half_range
+        normalized_vel = joint_vel / half_range
+        normalized_error = (reference_pos - joint_pos) / half_range
+    else:
+        normalized_pos = joint_pos
+        normalized_vel = joint_vel
+        normalized_error = reference_pos - joint_pos
+    output[:, 0, :num_joints] = normalized_pos * joint_valid_float
+    output[:, 1, :num_joints] = (
+        normalized_vel * float(velocity_scale) * joint_valid_float
+    )
+    output[:, 2, :num_joints] = normalized_error * joint_valid_float
+    output[:, 3, :num_joints] = joint_valid_float
+    return output.flatten(start_dim=1)
+
+
+def active_articulation_joint_future(
+    env: ManagerBasedEnv,
+    command_name: str = "motion",
+    max_joints: int = 4,
+    normalize_by_joint_limits: bool = False,
+) -> torch.Tensor:
+    """Padded future joint targets relative to the current simulated joint state."""
+    if max_joints <= 0:
+        raise ValueError(f"max_joints must be positive, got {max_joints}")
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    joint_pos, _, _, _, _ = utils.get_active_articulation_joint_tracking_state(
+        env, command
+    )
+    future_pos, future_valid = utils.get_active_articulation_joint_future_reference(
+        env, command
+    )
+    num_joints = joint_pos.shape[1]
+    if num_joints > max_joints:
+        raise ValueError(
+            "Active articulation exceeds the configured future observation capacity: "
+            f"usd={num_joints}, max_joints={max_joints}"
+        )
+    output = torch.zeros(
+        env.num_envs,
+        command.num_future_frames,
+        max_joints,
+        dtype=future_pos.dtype if future_pos.numel() else torch.float32,
+        device=env.device,
+    )
+    if num_joints:
+        future_delta = future_pos - joint_pos[:, None, :]
+        if normalize_by_joint_limits:
+            articulation = utils.get_active_articulation(env)
+            limits = articulation.data.soft_joint_pos_limits
+            half_range = 0.5 * (limits[..., 1] - limits[..., 0]).clamp_min(1e-3)
+            future_delta = future_delta / half_range[:, None, :]
+        output[:, :, :num_joints] = future_delta * future_valid.to(
+            dtype=future_pos.dtype
+        )
+    return output.flatten(start_dim=1)
+
+
+def _get_hand_pose_w_from_transformer_or_robot(env: ManagerBasedEnv, transformer):
+    cfg = getattr(env.cfg, "config", {}) if hasattr(env, "cfg") else {}
+    hand_frame_links = list(cfg.get("object_to_hand_frame_links", []))
+    robot = env.scene["robot"]
+
+    if hand_frame_links:
+        body_names = robot.body_names
+        indices = [body_names.index(link) for link in hand_frame_links if link in body_names]
+        if indices:
+            hand_pos_w = robot.data.body_pos_w[:, indices, :].mean(dim=1)
+            hand_quat_w = robot.data.body_quat_w[:, indices[0], :]
+            return hand_pos_w, hand_quat_w
+
+    if hasattr(transformer.data, "target_pos_w") and hasattr(transformer.data, "target_quat_w"):
+        target_pos_w = transformer.data.target_pos_w
+        target_quat_w = transformer.data.target_quat_w
+        if target_pos_w.shape[1] > 0:
+            return target_pos_w.mean(dim=1), target_quat_w[:, 0, :]
+
+    return None, None
 
 
 def _get_hand_pose_in_object_frame(transformer) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2832,6 +3273,17 @@ def _get_hand_pose_in_object_frame(transformer) -> tuple[torch.Tensor, torch.Ten
 def get_hand_object_transform(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Get transform from the configured hand reference frame to the object."""
     transformer = env.scene[asset_cfg.name]
+    if "object" not in env.scene.rigid_objects:
+        hand_pos_w, hand_quat_w = _get_hand_pose_w_from_transformer_or_robot(env, transformer)
+        if hand_pos_w is not None:
+            command: commands.TrackingCommand = env.command_manager.get_term("motion")
+            object_pos_w, object_quat_w, _, _, _ = utils.get_target_object_current_state(
+                env, command
+            )
+            object_pos_in_hand = quat_apply(quat_inv(hand_quat_w), object_pos_w - hand_pos_w)
+            object_quat_in_hand = quat_mul(quat_inv(hand_quat_w), object_quat_w)
+            return torch.cat([object_pos_in_hand, object_quat_in_hand], dim=-1)
+
     hand_pos_in_obj, hand_quat_in_obj = _get_hand_pose_in_object_frame(transformer)
 
     # Invert transform: object position in hand frame
@@ -2851,6 +3303,19 @@ def hand_object_transform_6d(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) ->
         torch.Tensor: Object pose in hand frame, shape (num_envs, 9) = 3 pos + 6 ori
     """
     transformer = env.scene[asset_cfg.name]
+    if "object" not in env.scene.rigid_objects:
+        hand_pos_w, hand_quat_w = _get_hand_pose_w_from_transformer_or_robot(env, transformer)
+        if hand_pos_w is not None:
+            command: commands.TrackingCommand = env.command_manager.get_term("motion")
+            object_pos_w, object_quat_w, _, _, _ = utils.get_target_object_current_state(
+                env, command
+            )
+            object_pos_in_hand = quat_apply(quat_inv(hand_quat_w), object_pos_w - hand_pos_w)
+            object_quat_in_hand = quat_mul(quat_inv(hand_quat_w), object_quat_w)
+            mat = matrix_from_quat(object_quat_in_hand)
+            ori_6d = mat[..., :2].reshape(mat.shape[0], -1)
+            return torch.cat([object_pos_in_hand, ori_6d], dim=-1)
+
     hand_pos_in_obj, hand_quat_in_obj = _get_hand_pose_in_object_frame(transformer)
 
     # Invert transform: object position in hand frame
@@ -2864,7 +3329,12 @@ def hand_object_transform_6d(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) ->
     return torch.cat([object_pos_in_hand, ori_6d], dim=-1)  # (num_envs, 9)
 
 
-def get_finger_tips_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+def get_finger_tips_contact_force(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    command_name: str = "motion",
+    hand: str = "right_hand",
+) -> torch.Tensor:
     """Get contact forces on the configured hand contact links.
 
     The sensor is configured with:
@@ -2875,11 +3345,64 @@ def get_finger_tips_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityC
     - Dim 1: object (prim_path)
     - Dim 2: configured hand links in filter_prim_paths_expr order
     """
-    sensor = env.scene[sensor_cfg.name]
-    force = sensor.data.force_matrix_w
+    command = env.command_manager.get_term(command_name)
+    force = utils.get_target_object_contact_forces(
+        env,
+        command,
+        hand=hand,
+        fallback_sensor_name=sensor_cfg.name,
+    )
+    if force is None:
+        return torch.zeros(env.num_envs, 0, device=env.device)
 
-    # Shape: (N, 1, num_links, 3) -> select all tracked links and flatten.
-    return force[:, 0, :, :].reshape(env.num_envs, -1)
+    # Shape: (N, num_objects, num_links, 3). Sum across tracked object bodies
+    # so the observation shape remains num_links * 3 for single and multi-object scenes.
+    if force.ndim == 4:
+        force = force.sum(dim=1)
+    return force.reshape(env.num_envs, -1)
+
+
+def bilateral_hand_contact_force_summary(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    left_sensor_cfg: SceneEntityCfg = SceneEntityCfg("object_to_left_hand_contact_sensor"),
+    command_name: str = "motion",
+) -> torch.Tensor:
+    """Return a fixed-width bilateral contact observation.
+
+    The legacy YAM observation exposes four right-hand contact-force vectors
+    (12D).  Represent each hand with its thumb vector and one aggregate vector
+    for the remaining finger/palm contacts, then concatenate right and left.
+    This preserves the 12D network contract without cancelling opposing thumb
+    and support-finger forces in a valid grasp.
+    """
+    command = env.command_manager.get_term(command_name)
+
+    def hand_force_pair(hand: str, fallback_sensor_name: str) -> torch.Tensor:
+        force = utils.get_target_object_contact_forces(
+            env,
+            command,
+            hand=hand,
+            fallback_sensor_name=fallback_sensor_name,
+        )
+        if force is None:
+            return torch.zeros(env.num_envs, 6, device=env.device)
+        if force.shape[0] != env.num_envs or force.shape[-1] != 3:
+            raise ValueError(
+                f"Unexpected {hand} contact-force shape {tuple(force.shape)}; "
+                f"expected [num_envs, ..., 3]"
+            )
+        force = force.reshape(env.num_envs, -1, 3)
+        thumb_force = force[:, 0]
+        if force.shape[1] > 1:
+            support_force = force[:, 1:].sum(dim=1)
+        else:
+            support_force = torch.zeros_like(thumb_force)
+        return torch.cat([thumb_force, support_force], dim=-1)
+
+    right_force = hand_force_pair("right_hand", sensor_cfg.name)
+    left_force = hand_force_pair("left_hand", left_sensor_cfg.name)
+    return torch.cat([right_force, left_force], dim=-1)
 
 
 def grab_contact_flag(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
@@ -3002,12 +3525,15 @@ def get_finger_tips_contact_force_dual_arm(
     right_force = right_hand_sensor.data.force_matrix_w
     left_force = left_hand_sensor.data.force_matrix_w
 
-    # Shape: (N, 1, 4, 3) -> select all finger tips: [:, 0, :, :] -> (N, 4, 3)
-    # Reshape to (N, 12) for output
+    if right_force.ndim == 4:
+        right_force = right_force.sum(dim=1)
+    if left_force.ndim == 4:
+        left_force = left_force.sum(dim=1)
+
     return torch.cat(
         [
-            right_force[:, 0, :, :].reshape(env.num_envs, -1),
-            left_force[:, 0, :, :].reshape(env.num_envs, -1),
+            right_force.reshape(env.num_envs, -1),
+            left_force.reshape(env.num_envs, -1),
         ],
         dim=1,
     )

@@ -1,0 +1,29 @@
+# Extends grab_rewards_no_lift_ucw_contact_wrist_ori with BOTH left and right
+# hand grasp/contact rewards (original only had right hand).
+# Adds: grasp_reward_left, grasp_finger_direction_left, grasp_contact_center_left
+# Uses tracking_relative_body_ori_weighted for per-body weight tuning.
+
+defaults:
+  # Robot motion tracking rewards (from HOI tracking)
+  - terms/tracking_anchor_pos@_here_
+  - terms/tracking_anchor_ori@_here_
+  - terms/tracking_relative_body_pos@_here_
+  - terms/tracking_relative_body_ori_weighted@_here_
+  - terms/tracking_body_linvel@_here_
+  - terms/tracking_body_angvel@_here_
+  - terms/undesired_contacts_no_ankle_hand@_here_
+  - terms/hand_table_contact_penalty@_here_
+  # Grasping rewards — right hand
+  - terms/grasp_reward@_here_
+  - terms/grasp_finger_direction@_here_
+  - terms/grasp_contact_center_right@_here_
+  # Grasping rewards — left hand
+  - terms/grasp_reward_left@_here_
+  - terms/grasp_finger_direction_left@_here_
+  - terms/grasp_contact_center_left@_here_
+  # Shared
+  - terms/finger_primitive_limit@_here_
+  # Object motion tracking reward (OmniGrasp r_t^obj)
+  - terms/object_tracking_reward@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.rewards.RewardsCfg

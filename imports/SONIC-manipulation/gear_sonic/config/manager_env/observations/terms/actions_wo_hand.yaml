@@ -1,0 +1,8 @@
+actions_wo_hand:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:last_action_wo_hand
+  params:
+    asset_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: robot
+    # Uses G1_ISAACLab_ORDER mapping (29 body joints) by default

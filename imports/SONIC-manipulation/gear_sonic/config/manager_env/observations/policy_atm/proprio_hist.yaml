@@ -1,0 +1,46 @@
+# Proprioception observations without hand joints - for pre-trained action_transform_module
+# This mirrors the policy observation structure but excludes hand joint observations
+
+defaults:
+  - ../terms/base_ang_vel@_here_
+  - ../terms/joint_pos_wo_hand@_here_
+  - ../terms/joint_vel_wo_hand@_here_
+  - ../terms/actions_wo_hand@_here_
+  - ../terms/gravity_dir@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.observations.PolicyAtmCfg
+enable_corruption: True
+concatenate_terms: True
+
+
+# define noise for certain terms (same as policy)
+base_ang_vel:
+  history_length: ${actor_prop_history_length}
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.2
+    n_max: 0.2
+
+joint_pos_wo_hand:
+  history_length: ${actor_prop_history_length}
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.01
+    n_max: 0.01
+
+joint_vel_wo_hand:
+  history_length: ${actor_prop_history_length}
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.5
+    n_max: 0.5
+
+actions_wo_hand:
+  history_length: ${actor_actions_history_length}
+
+gravity_dir:
+  history_length: ${actor_prop_history_length}
+  noise:
+    _target_: isaaclab.utils.noise.AdditiveUniformNoiseCfg
+    n_min: -0.05
+    n_max: 0.05

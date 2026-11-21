@@ -1,0 +1,6 @@
+anchor_pos:
+  _target_: isaaclab.managers.TerminationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:exceeded_anchor_height
+  params:
+    command_name: "motion"
+    threshold: 0.25

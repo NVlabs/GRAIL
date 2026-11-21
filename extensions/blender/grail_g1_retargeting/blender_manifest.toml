@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "grail_g1_retargeting"
+version = "0.1.0"
+name = "GRAIL G1 Retargeting Refinement"
+tagline = "Edit native robot joint curves and hand closure timing"
+maintainer = "GRAIL contributors"
+type = "add-on"
+tags = ["Animation"]
+blender_version_min = "4.2.0"
+blender_version_max = "4.4.0"
+license = ["SPDX:LicenseRef-NVIDIA"]
+
+[permissions]
+files = "Read joint bindings and save new motion candidates"

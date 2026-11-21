@@ -1,0 +1,35 @@
+# Critic observations for GRAB pick-and-place tracking with 43 DOF
+# Privileged version of policy observations (no noise, includes body state)
+# Uses DELTA observations following OmniGrasp/MimicManipulator:
+#   - object_pos_delta_multi_future: ref_future - sim_current (in body frame)
+#   - object_ori_delta_multi_future_6d: relative rotation from sim_current to ref_future
+
+defaults:
+  - ../terms/command@_here_
+  - ../terms/motion_anchor_pos_b@_here_
+  - ../terms/motion_anchor_ori_b@_here_
+  - ../terms/body_pos@_here_
+  - ../terms/body_ori@_here_
+  - ../terms/base_lin_vel@_here_
+  - ../terms/base_ang_vel@_here_
+  - ../terms/joint_pos@_here_
+  - ../terms/joint_vel@_here_
+  - ../terms/actions@_here_
+  - ../terms/target_object_pos@_here_
+  - ../terms/hand_object_transform_6d@_here_
+  - ../terms/finger_tips_force@_here_
+  - ../terms/grab_contact_flag@_here_
+  # Object current state in body frame (3 pos + 6 ori = 9D)
+  - ../terms/object_pos_b@_here_
+  - ../terms/object_ori_b_6d@_here_
+  # Table state in body frame (3 pos + 6 ori = 9D)
+  - ../terms/table_pos_b@_here_
+  - ../terms/table_ori_b@_here_
+  # Object DELTA observations (ref_future - sim_current)
+  - ../terms/object_pos_delta_multi_future@_here_
+  - ../terms/object_ori_delta_multi_future_6d@_here_
+  # Body multi-future observations (same as G1 encoder input!)
+  - ../terms/command_multi_future@_here_
+  - ../terms/motion_anchor_ori_b_mf@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.observations.PrivilegedCfg

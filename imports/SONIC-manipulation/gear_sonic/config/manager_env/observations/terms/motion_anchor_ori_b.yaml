@@ -1,0 +1,5 @@
+motion_anchor_ori_b:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:motion_anchor_ori_b
+  params:
+    command_name: "motion"

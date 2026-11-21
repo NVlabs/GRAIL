@@ -1,0 +1,13 @@
+physics_material:
+  _target_: isaaclab.managers.EventTermCfg
+  func: gear_sonic.envs.manager_env.mdp:randomize_rigid_body_material
+  mode: "startup"
+  params:
+    asset_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "robot"
+      body_names: ".*"
+    static_friction_range: [0.3, 1.6]
+    dynamic_friction_range: [0.3, 1.2]
+    restitution_range: [0.0, 0.5]
+    num_buckets: 64

@@ -1,0 +1,14 @@
+# @package _global_
+# Benchmark-only probe: arm B plus the canonical full-body contact sensors that
+# arm D can host on these packs (active entity + per-link ground). The packs'
+# static-context USDs are collision-only, so no static-context sensor exists.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_b
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_dscene_probe
+
+manager_env:
+  config:
+    enable_canonical_full_body_contact_sensors: true
+    canonical_static_context_contact_sensor_enabled: false

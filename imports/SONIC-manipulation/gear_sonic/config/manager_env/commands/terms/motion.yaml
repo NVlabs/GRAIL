@@ -1,0 +1,67 @@
+motion:
+  _target_: gear_sonic.envs.manager_env.mdp.commands.TrackingCommandCfg
+  asset_name: "robot"
+
+  motion_lib_cfg:
+    motion_file: ${robot.motion.motion_file}
+    smpl_motion_file:
+    asset:
+      assetRoot: "gear_sonic/data/assets/robot_description/mjcf/"
+      assetFileName: "g1_29dof_rev_1_0.xml"
+      urdfFileName: ""
+    extend_config: []
+    target_fps: 50
+    multi_thread: true
+    filter_motion_keys:
+    adaptive_sampling:
+      enable: true
+      bin_size: 50
+      sequence_length_agnostic: true
+      init_num_failures: 1
+      uniform_sampling_rate: 0.1
+      pre_failure_sample_window: 200
+      use_failure_rate_decay: false
+      decay_gamma: 0.8
+      adp_samp_failure_rate_max_over_mean: 50.0
+
+  resampling_time_range: [1000000000.0, 1000000000.0]  # [1.0e9, 1.0e9]
+  debug_vis: true
+  dt_future_ref_frames: 0.1
+  num_future_frames: 5
+  pose_range:
+    x: [-0.05, 0.05]
+    y: [-0.05, 0.05]
+    z: [-0.01, 0.01]
+    roll: [-0.1, 0.1]
+    pitch: [-0.1, 0.1]
+    yaw: [-0.2, 0.2]
+  velocity_range:
+    x: [-0.5, 0.5]
+    y: [-0.5, 0.5]
+    z: [-0.2, 0.2]
+    roll: [-0.52, 0.52]
+    pitch: [-0.52, 0.52]
+    yaw: [-0.78, 0.78]
+  joint_position_range: [-0.1, 0.1]
+  joint_velocity_range: [-0, 0] # default is turned off.
+  anchor_body: "pelvis"
+  vr_3point_body: ["left_wrist_yaw_link", "right_wrist_yaw_link", "torso_link"]
+  vr_3point_body_offset: [[0.18, -0.025, 0.0],[0.18, +0.025, 0.0],[0.0, 0.0, 0.35]]
+  reward_point_body: ["pelvis", "left_wrist_yaw_link", "right_wrist_yaw_link", "left_ankle_roll_link", "right_ankle_roll_link"]
+  reward_point_body_offset: [[0.0, 0.0, 0.0], [0.18, -0.025, 0.0], [0.18, +0.025, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+  body_names: [
+    "pelvis",
+    "left_hip_roll_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_roll_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_wrist_yaw_link",
+  ]

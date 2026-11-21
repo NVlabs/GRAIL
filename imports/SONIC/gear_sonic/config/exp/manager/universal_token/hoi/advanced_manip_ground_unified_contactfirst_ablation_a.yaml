@@ -1,0 +1,27 @@
+# @package _global_
+# RP2 contact ablation arm A: the contact-first/no-VOF baseline with only the
+# latent residual scale changed from 0.1 to 0.2.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_a
+
+manager_env:
+  config:
+    latent_residual_scale: 0.2
+
+# Execution only (added after an OOM): free CUDA tensors held in
+# Python reference cycles every PPO update. Running A/B/C processes are not
+# affected; a failure-requeued leg resumes from last.pt with this setting.
+algo:
+  config:
+    gc_collect_every_n_iterations: 1
+
+# Execution only: overwrite last.pt every 100 updates even
+# though the launcher pins save_last_frequency=500, to cut the rollback after
+# QOS preemption. model_step_* checkpoints stay every 500 updates. Running
+# processes are unaffected; each job's next automatic requeue picks this up.
+callbacks:
+  model_save:
+    save_last_frequency_cap: 100

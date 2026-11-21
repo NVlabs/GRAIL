@@ -1,0 +1,43 @@
+# @package _global_
+# Actor-critic for HOI staged training with auxiliary loss support
+# The MLP policy outputs meta-actions, which are converted to actual actions by the pretrained tokenizer
+# Uses BaseModuleAux which supports aux_loss_func and aux_loss_coef
+
+algo:
+  config:
+    actor:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Actor
+      running_mean_std: False
+      output_original_obs_dict: True
+      has_aux_loss: True  # Enable auxiliary loss support
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModuleAux
+        process_output_dim: True
+        aux_loss_func:
+          latent_l2:
+            _target_: gear_sonic.trl.losses.token_losses.LatentL2Loss
+            latent_dim: 64
+        aux_loss_coef:
+          latent_l2: 0.01
+        module_config_dict:
+          input_dim: [actor_obs]
+          output_dim: [robot_action_dim]  # Uses meta_action_dim from experiment config
+          layer_config:
+            type: MLP
+            hidden_dims: [512, 256, 128]
+            activation: SiLU
+
+    critic:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Critic
+      running_mean_std: False
+      backbone:
+        _target_: gear_sonic.trl.modules.base_module.BaseModule
+        process_output_dim: True
+        module_config_dict:
+          type: MLP
+          input_dim: [critic_obs]
+          output_dim: [1]
+          layer_config:
+            type: MLP
+            hidden_dims: [512, 256, 128]
+            activation: SiLU

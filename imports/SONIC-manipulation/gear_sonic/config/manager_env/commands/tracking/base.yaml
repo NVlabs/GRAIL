@@ -1,0 +1,6 @@
+# Standard command composition
+
+defaults:
+  - terms/motion@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.commands.CommandsCfg

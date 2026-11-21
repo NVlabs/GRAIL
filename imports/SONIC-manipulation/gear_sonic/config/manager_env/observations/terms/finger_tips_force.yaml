@@ -1,0 +1,7 @@
+finger_tips_force:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:get_finger_tips_contact_force
+  params:
+    sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "object_to_hand_contact_sensor"

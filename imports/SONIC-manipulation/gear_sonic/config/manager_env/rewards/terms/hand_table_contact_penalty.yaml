@@ -1,0 +1,8 @@
+hand_table_contact_penalty:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:reward_hand_table_contact_penalty
+  weight: -0.5
+  params:
+    sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "table_to_hand_contact_sensor"

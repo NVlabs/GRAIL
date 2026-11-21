@@ -1,0 +1,6 @@
+object_pos_deviation:
+  _target_: isaaclab.managers.TerminationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:object_pos_deviation
+  params:
+    command_name: "motion"
+    threshold: 0.1  # Maximum allowed object position deviation (meters)

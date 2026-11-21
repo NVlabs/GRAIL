@@ -1,0 +1,17 @@
+# @package _global_
+# RP2 contact ablation arm E: arm D plus only HiPHI's optimizer/exploration
+# settings. Mini-batches, the adaptive KL schedule and its LR bounds
+# [1e-5, 2e-4], and every other knob are inherited from D.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_ablation_d
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_ablation_e
+
+algo:
+  config:
+    init_noise_std: 0.3
+    freeze_noise_std: true
+    actor_learning_rate: 1.0e-4
+    entropy_coef: 1.0e-4
+    desired_kl: 0.05

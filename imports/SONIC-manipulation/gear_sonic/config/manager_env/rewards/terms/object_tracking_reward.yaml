@@ -1,0 +1,29 @@
+# Shared object tracking term (user default 2026-10-13, aligned with the historical GRAIL run
+# grail_native10000_full3072_accept_v3): exponential kernel on the unsquared position error (m) and quaternion
+# angle (rad), w_op 0.5 / w_or 0.3 (not renormalized), velocity weights 0 (velocities only activate),
+# activation = actual left OR right hand contact OR reference clearly moving. Entries override the weight (20).
+object_tracking_reward:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:object_tracking_reward
+  weight: 20.0
+  params:
+    command_name: "motion"
+    sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "object_to_hand_contact_sensor"  # right-hand finger/object contact sensor
+    left_sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "object_to_left_hand_contact_sensor"
+    contact_hands: [left_hand, right_hand]
+    w_op: 0.5      # object position weight
+    w_or: 0.3      # object rotation weight
+    w_ov: 0.0      # object linear velocity weight (velocity never rewarded)
+    w_oav: 0.0     # object angular velocity weight (velocity never rewarded)
+    pos_exp_coeff: -10.0
+    ori_exp_coeff: -20.0
+    vel_exp_coeff: -5.0
+    ang_vel_exp_coeff: -5.0
+    activation: contact_or_refmotion
+    ref_lin_speed_threshold: 0.05
+    ref_ang_speed_threshold: 0.1
+    object_tracking_version: grail_kernel_contact_or_refmotion_v1

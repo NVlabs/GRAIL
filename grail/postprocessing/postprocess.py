@@ -28,6 +28,7 @@ def post_process_hoi_result(hoi_data, mesh_data_dir, cfg):
 
     human_data = hoi_data["human_data"]
     obj_data = hoi_data["obj_data"]
+    fixed_contact = hoi_data["meta"].get("fixed_contact_prediction")
 
     # Convert to torch tensors (CPU only)
     obj_t = torch.from_numpy(obj_data["obj_t"]).float()
@@ -37,43 +38,22 @@ def post_process_hoi_result(hoi_data, mesh_data_dir, cfg):
     human_trans = torch.from_numpy(human_data["trans"]).float()
 
     # ========== Compute human vertices ==========
-    # Prepare motion data (supports both SMPLX and SOMA)
+    # Prepare motion data
     motion_data = {
         "poses": torch.from_numpy(human_data["poses"]).float().to(device),
         "trans": torch.from_numpy(human_data["trans"]).float().to(device),
     }
 
-    # SMPLX uses "betas", SOMA uses "identity_coeffs" + "scale_params"
-    if "betas" in human_data:
-        motion_data["betas"] = torch.from_numpy(human_data["betas"]).float().to(device)
-    if "identity_coeffs" in human_data:
-        motion_data["identity_coeffs"] = (
-            torch.from_numpy(human_data["identity_coeffs"]).float().to(device)
-        )
-    if "scale_params" in human_data:
-        motion_data["scale_params"] = (
-            torch.from_numpy(human_data["scale_params"]).float().to(device)
-        )
+    for field in ("identity_coeffs", "scale_params", "left_hand_pose", "right_hand_pose"):
+        if field in human_data:
+            motion_data[field] = torch.from_numpy(human_data[field]).float().to(device)
 
-    if "left_hand_pose" in human_data:
-        motion_data["left_hand_pose"] = (
-            torch.from_numpy(human_data["left_hand_pose"]).float().to(device)
-        )
-    if "right_hand_pose" in human_data:
-        motion_data["right_hand_pose"] = (
-            torch.from_numpy(human_data["right_hand_pose"]).float().to(device)
-        )
     motion_data["scale"] = human_data.get("scale", 1.0)
 
     frame_num = motion_data["poses"].shape[0]
 
     # Setup body model
     human_model = create_human_model(human_model_cfg, device=device)
-    if human_model.model_type == "soma03":
-        human_model.load_shape_params(human_model_cfg, None, device)
-    if human_model.model_type == "g1_smplx":
-        motion_data["scale"] = 1.0
-
     # Generate mesh with joints
     verts, faces, joints = human_model.generate_mesh(
         motion_data, output_joints=True, require_grad=False
@@ -81,16 +61,10 @@ def post_process_hoi_result(hoi_data, mesh_data_dir, cfg):
     if cfg["post_processing"].get("save_joints", False):
         hoi_data["human_data"]["joints"] = joints.cpu().numpy()
 
-    # Get hand vertices for contact detection
-    try:
+    if fixed_contact is None:
+        # Get hand vertices for contact detection
         left_hand_verts = human_model.get_verts_segment(verts, ["L_Hand"])
         right_hand_verts = human_model.get_verts_segment(verts, ["R_Hand"])
-    except Exception:
-        from grail.models.smplx_model import get_smplx_verts_segment
-
-        # Fallback: use SMPLX segment extraction
-        left_hand_verts = get_smplx_verts_segment(verts, ["L_Hand"])
-        right_hand_verts = get_smplx_verts_segment(verts, ["R_Hand"])
 
     # ========== Load object vertices (from process_data.py) ==========
     # Get object path from metadata
@@ -104,80 +78,92 @@ def post_process_hoi_result(hoi_data, mesh_data_dir, cfg):
     inter_start_idx = hoi_data["meta"]["inter_start_idx"]
     inter_end_idx = hoi_data["meta"]["inter_end_idx"]
 
-    contact_threshold = 0.05  # 5cm threshold for contact detection
-    max_obj_verts = 10000  # Maximum object vertices for distance computation
-    obj_contact_points = {}
-    obj_verts_tensor = torch.from_numpy(obj_vertices).float()
+    if fixed_contact is not None:
+        # Preserve consumed material predictions and their exact active frames.
+        # These are targets, never a claim that the output mesh actually touches.
+        if fixed_contact["provenance"]["binding"]["frame_count"] != frame_num:
+            raise ValueError("Fixed contact metadata/source timeline differs during postprocessing")
+        obj_data["obj_contact_points"] = {
+            side: {int(frame): np.asarray(points, dtype=np.float32).reshape(-1, 3)
+                   for frame, points in fixed_contact["obj_contact_points"][side].items()}
+            for side in ("left_hand", "right_hand")
+        }
+        obj_data["contact_point_semantics"] = "predicted fixed material targets; not measured contact"
+    else:
+        contact_threshold = 0.05  # 5cm threshold for contact detection
+        max_obj_verts = 10000  # Maximum object vertices for distance computation
+        obj_contact_points = {}
+        obj_verts_tensor = torch.from_numpy(obj_vertices).float()
 
-    obj_contact_points_left_hand = {}
-    obj_contact_points_right_hand = {}
+        obj_contact_points_left_hand = {}
+        obj_contact_points_right_hand = {}
 
-    left_hand_inter_start_idx = -1
-    right_hand_inter_start_idx = -1
-    # for i in range(inter_start_idx, inter_end_idx):
-    nframes_before = cfg["post_processing"].get(
-        "compute_contact_points_nframes_before_inter_start", 48
-    )
-    for i in range(max(0, inter_start_idx - nframes_before), inter_end_idx):
-        # Transform vertices to world space
-        obj_verts_world = (obj_R[i] @ obj_verts_tensor.T).T + obj_t[i]
-        left_hand_verts_world = left_hand_verts[i]
-        right_hand_verts_world = right_hand_verts[i]
+        left_hand_inter_start_idx = -1
+        right_hand_inter_start_idx = -1
+        # for i in range(inter_start_idx, inter_end_idx):
+        nframes_before = cfg["post_processing"].get(
+            "compute_contact_points_nframes_before_inter_start", 48
+        )
+        for i in range(max(0, inter_start_idx - nframes_before), inter_end_idx):
+            # Transform vertices to world space
+            obj_verts_world = (obj_R[i] @ obj_verts_tensor.T).T + obj_t[i]
+            left_hand_verts_world = left_hand_verts[i]
+            right_hand_verts_world = right_hand_verts[i]
 
-        # Downsample object vertices if needed to reduce memory usage
-        if len(obj_verts_world) > max_obj_verts:
-            downsample_indices = torch.randperm(len(obj_verts_world))[:max_obj_verts]
-            obj_verts_sampled = obj_verts_world[downsample_indices]
-        else:
-            downsample_indices = torch.arange(len(obj_verts_world))
-            obj_verts_sampled = obj_verts_world
+            # Downsample object vertices if needed to reduce memory usage
+            if len(obj_verts_world) > max_obj_verts:
+                downsample_indices = torch.randperm(len(obj_verts_world))[:max_obj_verts]
+                obj_verts_sampled = obj_verts_world[downsample_indices]
+            else:
+                downsample_indices = torch.arange(len(obj_verts_world))
+                obj_verts_sampled = obj_verts_world
 
-        # Calculate contact points for LEFT hand
-        diff_left = left_hand_verts_world.unsqueeze(1) - obj_verts_sampled.unsqueeze(0)
-        distances_left = torch.norm(diff_left, dim=-1)
-        min_dist_per_obj_left, _ = distances_left.min(dim=0)
-        obj_contact_mask_left = min_dist_per_obj_left < contact_threshold
-        obj_contact_indices_sampled_left = torch.where(obj_contact_mask_left)[0]
-        obj_contact_indices_left = downsample_indices[obj_contact_indices_sampled_left]
+            # Calculate contact points for LEFT hand
+            diff_left = left_hand_verts_world.unsqueeze(1) - obj_verts_sampled.unsqueeze(0)
+            distances_left = torch.norm(diff_left, dim=-1)
+            min_dist_per_obj_left, _ = distances_left.min(dim=0)
+            obj_contact_mask_left = min_dist_per_obj_left < contact_threshold
+            obj_contact_indices_sampled_left = torch.where(obj_contact_mask_left)[0]
+            obj_contact_indices_left = downsample_indices[obj_contact_indices_sampled_left]
 
-        if len(obj_contact_indices_left) > 0:
-            obj_contact_points_world_left = obj_verts_world[obj_contact_indices_left]
-            obj_contact_points_local_left = (
-                obj_R[i].T @ (obj_contact_points_world_left - obj_t[i]).T
-            ).T
-            obj_contact_points_left_hand[i] = obj_contact_points_local_left.numpy()
-            if left_hand_inter_start_idx == -1:
-                left_hand_inter_start_idx = i
-        else:
-            obj_contact_points_left_hand[i] = np.empty((0, 3))
+            if len(obj_contact_indices_left) > 0:
+                obj_contact_points_world_left = obj_verts_world[obj_contact_indices_left]
+                obj_contact_points_local_left = (
+                    obj_R[i].T @ (obj_contact_points_world_left - obj_t[i]).T
+                ).T
+                obj_contact_points_left_hand[i] = obj_contact_points_local_left.numpy()
+                if left_hand_inter_start_idx == -1:
+                    left_hand_inter_start_idx = i
+            else:
+                obj_contact_points_left_hand[i] = np.empty((0, 3))
 
-        # Calculate contact points for RIGHT hand
-        diff_right = right_hand_verts_world.unsqueeze(1) - obj_verts_sampled.unsqueeze(0)
-        distances_right = torch.norm(diff_right, dim=-1)
-        min_dist_per_obj_right, _ = distances_right.min(dim=0)
-        obj_contact_mask_right = min_dist_per_obj_right < contact_threshold
-        obj_contact_indices_sampled_right = torch.where(obj_contact_mask_right)[0]
-        obj_contact_indices_right = downsample_indices[obj_contact_indices_sampled_right]
+            # Calculate contact points for RIGHT hand
+            diff_right = right_hand_verts_world.unsqueeze(1) - obj_verts_sampled.unsqueeze(0)
+            distances_right = torch.norm(diff_right, dim=-1)
+            min_dist_per_obj_right, _ = distances_right.min(dim=0)
+            obj_contact_mask_right = min_dist_per_obj_right < contact_threshold
+            obj_contact_indices_sampled_right = torch.where(obj_contact_mask_right)[0]
+            obj_contact_indices_right = downsample_indices[obj_contact_indices_sampled_right]
 
-        if len(obj_contact_indices_right) > 0:
-            obj_contact_points_world_right = obj_verts_world[obj_contact_indices_right]
-            obj_contact_points_local_right = (
-                obj_R[i].T @ (obj_contact_points_world_right - obj_t[i]).T
-            ).T
-            obj_contact_points_right_hand[i] = obj_contact_points_local_right.numpy()
-            if right_hand_inter_start_idx == -1:
-                right_hand_inter_start_idx = i
-        else:
-            obj_contact_points_right_hand[i] = np.empty((0, 3))
+            if len(obj_contact_indices_right) > 0:
+                obj_contact_points_world_right = obj_verts_world[obj_contact_indices_right]
+                obj_contact_points_local_right = (
+                    obj_R[i].T @ (obj_contact_points_world_right - obj_t[i]).T
+                ).T
+                obj_contact_points_right_hand[i] = obj_contact_points_local_right.numpy()
+                if right_hand_inter_start_idx == -1:
+                    right_hand_inter_start_idx = i
+            else:
+                obj_contact_points_right_hand[i] = np.empty((0, 3))
 
-    obj_contact_points = {
-        "left_hand": obj_contact_points_left_hand,
-        "right_hand": obj_contact_points_right_hand,
-    }
-    obj_data["obj_contact_points"] = obj_contact_points
-    print(
-        f"Left hand inter start idx: {left_hand_inter_start_idx}, right hand inter start idx: {right_hand_inter_start_idx}, inter start idx: {inter_start_idx}"
-    )
+        obj_contact_points = {
+            "left_hand": obj_contact_points_left_hand,
+            "right_hand": obj_contact_points_right_hand,
+        }
+        obj_data["obj_contact_points"] = obj_contact_points
+        print(
+            f"Left hand inter start idx: {left_hand_inter_start_idx}, right hand inter start idx: {right_hand_inter_start_idx}, inter start idx: {inter_start_idx}"
+        )
 
     # table_center_global = torch.tensor([8.25, 9, 0.0]) #p3
     # table_center_global = torch.tensor([5.7, 13.75, 0.0]) #p4

@@ -1,0 +1,4 @@
+read_eval:
+  _target_: gear_sonic.trl.callbacks.read_eval_callback.ReadEvalCallback
+  eval_dir: ${experiment_dir}/eval
+  check_interval: 1

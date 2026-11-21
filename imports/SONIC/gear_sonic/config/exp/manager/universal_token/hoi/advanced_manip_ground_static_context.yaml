@@ -1,0 +1,15 @@
+# @package _global_
+#
+# GRAIL-aligned single-object RP2 training with passive static scene context.
+#
+# The actor, critic, rewards, events, and object tracking stay aligned with
+# advanced_manip_ground. This RP2-specific variant checks grasp acquisition for
+# each reference-contact hand independently; static context spawning is enabled
+# by launcher overrides through manager_env.config.static_context_usd_path.
+
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_contactfirst_base
+  - override /manager_env/terminations: tracking/hoi_grab_no_lift_grasp_failure_bimanual
+  - _self_
+
+exp_var: advanced_manip_ground_static_context

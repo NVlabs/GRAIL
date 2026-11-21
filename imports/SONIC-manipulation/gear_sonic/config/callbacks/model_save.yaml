@@ -1,0 +1,5 @@
+model_save:
+  _target_: gear_sonic.trl.callbacks.model_save_callback.ModelSaveCallback
+  save_dir: ${experiment_dir}
+  save_frequency: 2000
+  max_disk_usage: 14.8 # TB

@@ -1,0 +1,5 @@
+gravity_dir:
+  _target_: isaaclab.managers.ObservationTermCfg
+  func: gear_sonic.envs.manager_env.mdp:gravity_dir
+  params:
+    command_name: "motion"

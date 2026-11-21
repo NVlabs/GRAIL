@@ -1,0 +1,15 @@
+# @package _global_
+# Noise-only control for the SONIC-LoRA arm: identical 95-D stochastic body action
+# (fixed std 0.05 on 29 body targets, stored post-FSQ codes) and factored PPO, but the
+# decoder adapters are disabled and frozen (B = 0, not optimized): the decoder is frozen SONIC.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_contactfirst_b_hiphi_sonic_lora
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst_b_hiphi_sonic_noiseonly
+
+algo:
+  config:
+    actor:
+      sonic_decoder_lora:
+        trainable: false

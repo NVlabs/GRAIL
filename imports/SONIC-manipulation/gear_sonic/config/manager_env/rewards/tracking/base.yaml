@@ -1,0 +1,14 @@
+# Standard reward composition - combines all reward terms
+
+defaults:
+  - terms/tracking_anchor_pos@_here_
+  - terms/tracking_anchor_ori@_here_
+  - terms/tracking_relative_body_pos@_here_
+  - terms/tracking_relative_body_ori@_here_
+  - terms/tracking_body_linvel@_here_
+  - terms/tracking_body_angvel@_here_
+  - terms/action_rate_l2@_here_
+  - terms/joint_limit@_here_
+  - terms/undesired_contacts@_here_
+
+_target_: gear_sonic.envs.manager_env.mdp.rewards.RewardsCfg

@@ -1,0 +1,10 @@
+# Penalty for finger primitive actions exceeding valid limits
+# Encourages policy to output actions within valid range naturally
+finger_primitive_limit:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:reward_finger_primitive_limit
+  weight: -10.0  # Negative weight = penalty
+  params:
+    mode: "discrete"  # "linear" or "discrete"
+    action_scale: 1.0  # For linear mode: valid range is [-1/scale, 1/scale]
+    discrete_threshold: 0.5  # For discrete mode: valid range is [-threshold, threshold]

@@ -1,0 +1,17 @@
+grasp_reward:
+  _target_: isaaclab.managers.RewardTermCfg
+  func: gear_sonic.envs.manager_env.mdp:reward_grasp
+  weight: 1.0
+  params:
+    sensor_cfg:
+      _target_: isaaclab.managers.SceneEntityCfg
+      name: "object_to_hand_contact_sensor"
+    contact_threshold: 0.1
+    min_contacts: 3
+    gate_mode: "binary"
+    pre_contact_frames: 0
+    post_contact_frames: 0
+    gate_sigma_frames: 5.0
+    contact_time_shift_frames: 0
+    hand: "right_hand"
+    command_name: "motion"

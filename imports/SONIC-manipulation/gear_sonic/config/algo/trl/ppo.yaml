@@ -1,0 +1,18 @@
+dataset_name: dummy
+output_dir: './trl'
+learning_rate: ${algo.config.actor_learning_rate}
+num_total_batches: ${algo.config.num_learning_iterations}  # same as num of total training steps
+total_episodes:     # num_total_batches * num_envs (batch_size)
+num_ppo_epochs: ${algo.config.num_learning_epochs}
+num_mini_batches: ${algo.config.num_mini_batches}
+per_device_train_batch_size:
+gradient_accumulation_steps: 1
+report_to: none
+gamma: ${algo.config.gamma}
+lam: ${algo.config.lam}
+vf_coef: ${algo.config.value_loss_coef}
+# entropy_coef: ${algo.config.entropy_coef}
+max_grad_norm: ${algo.config.max_grad_norm}
+lr_scheduler_type: constant
+save_strategy: 'no'
+disable_tqdm: True
