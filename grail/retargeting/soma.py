@@ -268,7 +268,7 @@ def run_pipeline(
     python=None,
     batch_size=32,
     target="unitree_g1_dex3",
-    robot_model_xml="imports/GMR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml",
+    robot_model_xml="assets/robots/unitree_g1/g1_mocap_29dof_with_hands.xml",
 ):
     """Export native SOMA03 and retarget it to G1+DEx3 by default."""
     output = Path(output_dir).expanduser().resolve()
@@ -345,7 +345,7 @@ def main(argv=None):
             args.robot_model_xml
             or config.get(
                 "robot_model_xml",
-                "imports/GMR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml",
+                "assets/robots/unitree_g1/g1_mocap_29dof_with_hands.xml",
             )
         ),
     )

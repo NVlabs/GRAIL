@@ -334,7 +334,7 @@ def keypoint_loss(pred_keypoints, gt_keypoints, gt_conf=None, conf_thres=0.6):
         pred_keypoints = pred_keypoints[gt_conf > conf_thres]
 
     if pred_keypoints.shape[0] == 0:
-        return torch.tensor(0.0)
+        return pred_keypoints.sum() * 0.0
 
     return torch.nn.functional.l1_loss(pred_keypoints, gt_keypoints)
 

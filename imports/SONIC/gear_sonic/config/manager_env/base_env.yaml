@@ -36,6 +36,11 @@ config:
   save_rendering_dir: ${experiment_dir}/renderings_training
   experiment_dir: ${experiment_dir}
   terrain_type: plane # "0: plane" or "1: trimesh"
+  # Opt-in: PhysX parses env_0/Robot once and replicates it to all envs (see
+  # gear_sonic/physx_replication.py). Default off to preserve the released
+  # task-general behavior; the ContactFirst manipulation configs enable it.
+  physx_robot_replication: false
+  physx_replication_prims: [Robot]
 
   # Object mass override (kg). Set to override USD-defined mass.
   # Example: ++manager_env.config.object_mass=0.1
@@ -54,6 +59,11 @@ config:
   action_transform_module_checkpoint:
   meta_action_dim:
   needs_policy_atm: true
+  # Optional PPO-owned residual appended between latent and hand actions.
+  # Disabled by default; RP2 action-noise ablations enable all 29 G1 body DOFs.
+  raw_body_residual_dim: 0
+  raw_body_residual_units: joint_position_radians
+  raw_body_residual_clip: null
 
   obs:
     obs_dict: {}

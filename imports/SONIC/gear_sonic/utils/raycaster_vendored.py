@@ -81,21 +81,29 @@ def _triangulate(counts, indices):
     """Fan-triangulate faces described by USD ``faceVertexCounts``.
 
     ``faceVertexIndices`` is a flat array whose slicing is defined by
-    ``faceVertexCounts``; reshaping it to (-1, 3) is only correct when every
-    face is already a triangle. A quad mesh has ``4 * n_faces`` indices, which
-    is divisible by 3 whenever ``n_faces`` is, so the wrong reshape does not
-    raise -- it silently returns triangles that span unrelated faces.
+    ``faceVertexCounts``. Reshaping the indices directly is only valid when
+    every face is already a triangle.
     """
     counts = np.asarray(counts, dtype=np.int64)
     indices = np.asarray(indices, dtype=np.int64)
+
+    if counts.ndim != 1 or indices.ndim != 1:
+        raise ValueError("USD face counts and indices must be one-dimensional")
+    if np.any(counts < 3):
+        raise ValueError("USD mesh faces must contain at least three vertices")
+    if int(counts.sum()) != len(indices):
+        raise ValueError("USD faceVertexCounts does not match the number of faceVertexIndices")
     if (counts == 3).all():
         return indices.reshape(-1, 3)
+
     starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
-    tris = []
-    for start, n in zip(starts, counts):
-        fan = indices[start : start + n]
-        tris.extend((fan[0], fan[i], fan[i + 1]) for i in range(1, n - 1))
-    return np.asarray(tris, dtype=np.int64).reshape(-1, 3)
+    triangles = []
+    for start, num_vertices in zip(starts, counts):
+        face = indices[start : start + num_vertices]
+        triangles.extend(
+            (face[0], face[index], face[index + 1]) for index in range(1, num_vertices - 1)
+        )
+    return np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
 
 
 def _usd2trimesh(prim):

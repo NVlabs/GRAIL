@@ -21,12 +21,6 @@
 #     (or `docker exec` if it's already running).
 #   - --rebuild: `docker rm -f` the container first, then recreate.
 #
-# After the container is up, build the sonic overlay inside it:
-#   bash scripts/setup/install_env_sonic.sh
-# (That script auto-detects root, apt-installs Vulkan/git-lfs, creates the
-# sonic conda env, installs Isaac Sim 5.1 + Isaac Lab v2.3.2, applies the
-# GRAIL overlay, and git-lfs-pulls imports/SONIC.)
-
 set -eo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

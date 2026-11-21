@@ -1,0 +1,4 @@
+interface:
+  display_name: "GRAIL Source Videos"
+  short_description: "Compose scenes and generate reviewed source videos"
+  default_prompt: "Use $grail-2dhoi to configure the requested dataset, review its renders and generate source videos with the selected provider."

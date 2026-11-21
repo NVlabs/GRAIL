@@ -176,10 +176,15 @@ def render_all(
     camera_target=(0.0, 0.0, 0.8),
     headless=True,
     start_frame_skip=0,
+    robot_usd=None,
 ):
     """Render all trajectories with a single IsaacSim session."""
     import imageio
     import torch
+
+    robot_usd = robot_usd or os.environ.get("GRAIL_ROBOT_USD")
+    if not robot_usd or not os.path.isfile(robot_usd):
+        raise ValueError("Supply the G1 43-DOF robot asset via --robot_usd or GRAIL_ROBOT_USD")
 
     # ---- Launch IsaacSim ----
     from isaaclab.app import AppLauncher
@@ -199,7 +204,7 @@ def render_all(
     # Inline G1_43DOF_CFG to avoid importing groot.rl (which drags in unsynced code)
     G1_43DOF_CFG = ArticulationCfg(
         spawn=sim_utils.UsdFileCfg(
-            usd_path="imports/SONIC/gear_sonic/data/robots/g1/g1_43dof_s3.usda",
+            usd_path=os.path.abspath(robot_usd),
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -731,6 +736,7 @@ def render_all(
 
 def main():
     parser = argparse.ArgumentParser(description="Batch render trajectory replays (in-process)")
+    parser.add_argument("--robot_usd", help="G1 43-DOF robot asset (or set GRAIL_ROBOT_USD)")
     parser.add_argument(
         "--shard_dir", required=True, help="Path to shard directory containing metrics_eval.json"
     )
@@ -814,6 +820,7 @@ def main():
         camera_target=tuple(args.camera_target),
         headless=args.headless,
         start_frame_skip=args.start_frame_skip,
+        robot_usd=args.robot_usd,
     )
 
 

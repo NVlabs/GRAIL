@@ -21,10 +21,8 @@
 #      to skip when you already have an env with IsaacLab/IsaacSim installed
 #      (e.g. gearenv).
 #   3. Symlinks data/motion_lib_genhoi + models into imports/SONIC/gear_sonic/.
-#   4. pip install -e imports/GMR + imports/SONIC/gear_sonic[training]
+#   4. pip install -e imports/SONIC/gear_sonic[training]
 #      + GRAIL package (editable) + huggingface_hub.
-#      GRAIL-specific GMR behavior is applied at runtime by grail.adapters.gmr;
-#      the public GMR submodule is not modified.
 #   5. pip install retargeting-specific deps (smplx, mujoco, pxr, trimesh, ...).
 #   6. (PULL_LFS=1 — default when git-lfs is on PATH) git-lfs pull on
 #      imports/SONIC so the robot mesh STLs + policy ONNX materialize.
@@ -34,7 +32,6 @@ set -eo pipefail
 
 ENV_NAME="${GRAIL_SONIC_ENV:-sonic}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-GMR_DIR="${REPO_ROOT}/imports/GMR"
 BOOTSTRAP_SONIC="${BOOTSTRAP_SONIC:-1}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-1}"
 PULL_LFS="${PULL_LFS:-1}"
@@ -159,12 +156,6 @@ else
     conda activate "${ENV_NAME}"
 fi
 
-if [[ ! -d "${GMR_DIR}/general_motion_retargeting" ]]; then
-    echo "ERROR: ${GMR_DIR} is empty." >&2
-    echo "       Run: git submodule update --init imports/GMR" >&2
-    exit 1
-fi
-
 # --- Step 3: surface data/ and models/ into the SONIC submodule ---------
 # imports/SONIC/gear_sonic/ is the cwd for training scripts; it expects
 # data/motion_lib_genhoi/... and models/... to resolve from there.
@@ -175,11 +166,10 @@ ln -sfn ../../../models "${GEAR_SONIC}/models"
 echo ">>> Linked ${GEAR_SONIC}/{data/motion_lib_genhoi,models} -> repo root"
 
 # --- Step 4: editable installs ------------------------------------------
-echo ">>> pip install -e imports/GMR"
+echo ">>> Install pinned NumPy and OpenCV"
 pip install --no-deps \
     "numpy==${SONIC_NUMPY_VERSION}" \
     "opencv-python==${SONIC_OPENCV_VERSION}"
-pip install --no-deps -e "${GMR_DIR}"
 
 echo ">>> pip install -e imports/SONIC/gear_sonic[training] + huggingface_hub"
 pip install \
@@ -195,7 +185,7 @@ echo ">>> pip install -e . (grail, --no-deps)"
 # to numpy 2.x + opencv 4.13 and break gear_sonic (numpy==1.26.4), isaaclab-rl
 # (numpy<2), and isaacsim-kernel (numpy==1.26.0). The sonic env only consumes
 # grail.retargeting; its real deps (smplx, scipy, mujoco, mink, trimesh, pxr,
-# isaaclab, gmr) are installed by other steps in this script.
+# isaaclab) are installed by other steps in this script.
 pip install --no-deps -e "${REPO_ROOT}"
 
 # --- Step 5: retargeting-specific deps ----------------------------------
@@ -294,7 +284,6 @@ expected = {
     "daqp": "0.7.2",
     "datasets": "4.8.4",
     "gear_sonic": "0.1.0",
-    "general_motion_retargeting": "0.2.0",
     "grail": "0.1.0",
     "huggingface_hub": "0.36.2",
     "isaaclab": "0.54.2",
@@ -344,15 +333,19 @@ if problems:
         print(f"  - {problem}", file=sys.stderr)
     raise SystemExit(1)
 
-import general_motion_retargeting as gmr
 import gear_sonic
 import isaaclab
 import isaacsim
 import smpl_sim
-from grail.retargeting.retarget import main
+from importlib.util import find_spec
+from grail.retargeting import terrain
+from grail.retargeting.manipulation import handoff, pack
 
-print(f"  GMR: {gmr.__file__}")
-print("  GRAIL retargeting + gear_sonic + smpl_sim: OK")
+for module in ("gear_sonic.train_agent_trl", "gear_sonic.eval_contactfirst_trl"):
+    if find_spec(module) is None:
+        raise ImportError(f"Missing tracking module: {module}")
+
+print("  GRAIL tracking (terrain pack, manipulation handoff and pack, SONIC train and evaluate) + gear_sonic + smpl_sim: OK")
 print("  Isaac Lab + Isaac Sim: OK")
 print("  Critical package versions verified")
 PY
@@ -363,7 +356,7 @@ fi
 
 echo ""
 echo "Setup complete. Quick start:"
-echo "  bash grail/retargeting/scripts/retarget_pipeline.sh <data_dir> <output_folder>"
+echo "  python -m grail.retargeting.manipulation.handoff --help"
 echo ""
 echo "Full preflight:"
 echo "  OMNI_KIT_ACCEPT_EULA=Yes python imports/SONIC/check_environment.py --training"

@@ -10,7 +10,6 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -85,22 +84,6 @@ def main():
         type=float,
         default=0.5,
         help="Pairwise motion-key overlap (vs min shard size) above which merge FAILs (default: 0.5)",
-    )
-    parser.add_argument(
-        "--upload_pdx",
-        action="store_true",
-        help="After successful merge (counts PASS), upload merged/ to PDX via rclone",
-    )
-    parser.add_argument(
-        "--pdx_root",
-        default="gear:wbc_data/genhoi/motion_lib_genhoi_export",
-        help="PDX upload root (default: gear:wbc_data/genhoi/motion_lib_genhoi_export)",
-    )
-    parser.add_argument(
-        "--pdx_name",
-        help="Subdirectory name under pdx_root. Default: <source_basename>_s<step> "
-        "(e.g. stairs001_0303_s027000). Override for custom naming like "
-        "stairs001_0303_tns_s027000 to encode sweep ID.",
     )
     args = parser.parse_args()
 
@@ -308,63 +291,6 @@ def main():
 
     print()
     print(f"Done. Merged output at: {merged_dir}")
-
-    # ---- Optional: upload merged/ to PDX ----
-    if args.upload_pdx:
-        print()
-        print("=" * 70)
-        print("PDX upload")
-        print("=" * 70)
-        # Gate on count PASS + overlap FAIL checks — don't ship broken data.
-        if not merge_counts_pass:
-            print("SKIP: merge count check FAILed — refusing to upload partial/inconsistent data.")
-            sys.exit(2)
-        if overlap_fails:
-            print(
-                f"SKIP: {len(overlap_fails)} shard pair(s) above overlap threshold — refusing to upload."
-            )
-            sys.exit(2)
-
-        pdx_name = args.pdx_name
-        if not pdx_name:
-            source_basename = source_data.name
-            pdx_name = f"{source_basename}_s{step}"
-        pdx_dest = f"{args.pdx_root.rstrip('/')}/{pdx_name}/"
-
-        print(f"  source    : {merged_dir}/")
-        print(f"  dest      : {pdx_dest}")
-        print(
-            f"  file count: {merged_robot} robot + {merged_objects} objects + "
-            f"{merged_vis} vis MP4s + {merged_usd} USDs"
-        )
-
-        rclone_cmd = [
-            "rclone",
-            "copy",
-            f"{merged_dir}/",
-            pdx_dest,
-            "--progress",
-            "--transfers",
-            "8",
-            "--checkers",
-            "16",
-        ]
-        print(f"  cmd       : {' '.join(rclone_cmd)}")
-        print()
-        try:
-            result = subprocess.run(rclone_cmd, check=False)
-        except FileNotFoundError:
-            print("ERROR: rclone not found on PATH. Install rclone to use --upload_pdx.")
-            sys.exit(3)
-        if result.returncode != 0:
-            print(f"ERROR: rclone exited with code {result.returncode}")
-            sys.exit(4)
-        print()
-        print(f"Uploaded to: {pdx_dest}")
-        print(
-            f"Download with: rclone copy {pdx_dest} data/motion_lib_genhoi_export/{pdx_name}/ --progress"
-        )
-
 
 if __name__ == "__main__":
     main()

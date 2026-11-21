@@ -1,7 +1,7 @@
 """
 SOMA model utilities for the HOI optimizer.
 
-This module provides functions equivalent to those in smplx_model.py but for the SOMA body model.
+SOMA mesh generation and coordinate transforms.
 """
 
 import numpy as np
@@ -125,7 +125,7 @@ SOMA_SEGMENT_JOINT_INDICES = {
 # Body joints in body_pose tensor (28 joints: spine, head, arms including wrists, legs)
 # Excludes finger joints which are handled separately for hand optimization
 # Body joints in body_pose tensor (26 joints: spine, head, arms excluding wrists, legs)
-# Wrists are included in hand joints for consistency with SMPL-X implementation
+# Wrists are included in hand joints
 SOMA_BODY_POSE_INDICES = [
     0,
     1,
@@ -221,7 +221,7 @@ def forward_soma(soma_model, motion_data, require_grad=False, device="cuda"):
 
             Key naming (both supported):
                 - SOMA native: "body_pose", "transl", "global_orient"
-                - SMPL-X style: "poses", "trans"
+                - packed: "poses", "trans"
 
             Body pose formats:
                 Format 1 (separate global_orient):
@@ -243,7 +243,7 @@ def forward_soma(soma_model, motion_data, require_grad=False, device="cuda"):
     """
     # Handle different key naming conventions:
     # - SOMA native: body_pose, transl, global_orient
-    # - SMPL-X style: poses, trans (combined format)
+    # - packed: poses, trans (combined format)
 
     # Get body pose (supports both "body_pose" and "poses" keys)
     if "body_pose" in motion_data:
@@ -403,7 +403,7 @@ def generate_soma_mesh(
     # Apply scale if present in motion_data
     scale = motion_data.get("scale", 1.0)
     if scale != 1.0:
-        # Support both 'transl' (NOVA) and 'trans' (SMPL-X) key names
+        # Support both the 'transl' and 'trans' translation keys
         if "transl" in motion_data:
             transl = motion_data["transl"]
         elif "trans" in motion_data:
@@ -544,7 +544,7 @@ def get_soma_segment_indices(segment_name=["L_Hand", "R_Hand"], soma_model=None)
     """
     Return vertex indices for specified body segments.
 
-    Similar to get_smplx_segment_indices but for SOMA model.
+    Return material indices for the requested SOMA segments.
     Uses skinning weights from the SOMA model to determine which vertices belong
     to each body segment.
 
@@ -697,7 +697,7 @@ def transform_global_to_incam(global_motion_data, incam_motion_data, align_frame
 
     Args:
         global_motion_data: Global motion data containing poses and translation.
-            Supports both SOMA style ('global_orient', 'transl') and SMPL-X style ('poses', 'trans').
+            Supports both SOMA style ('global_orient', 'transl') and packed ('poses', 'trans').
         incam_motion_data: In-camera motion data with same key conventions.
         align_frame: Reference frame for alignment (default: 0)
         device: Device for computations
@@ -715,7 +715,7 @@ def transform_global_to_incam(global_motion_data, incam_motion_data, align_frame
         if k not in transformed_motion_data.keys():
             transformed_motion_data[k] = v.clone() if isinstance(v, torch.Tensor) else v
 
-    # Determine key names (SMPL-X style: trans/poses vs SOMA style: transl/global_orient)
+    # Determine key names (packed: trans/poses vs SOMA style: transl/global_orient)
     trans_key = "trans" if "trans" in global_motion_data else "transl"
 
     # Check if global_orient is separate or combined with poses
@@ -821,7 +821,7 @@ def transform_global_motion(
         for k, v in transformed_incam_motion_data.items()
     }
 
-    # Determine key names (SMPL-X style: trans/poses vs SOMA style: transl/global_orient/body_pose)
+    # Determine key names (packed: trans/poses vs SOMA style: transl/global_orient/body_pose)
     trans_key = "trans" if "trans" in transformed_incam_motion_data else "transl"
 
     # Check if global_orient is separate or combined with poses
@@ -889,104 +889,3 @@ def transform_global_motion(
         transformed_motion_data["scale"] = 1.0
 
     return transformed_motion_data
-
-
-def convert_smplx_to_soma_motion(
-    smplx_motion_data, soma_identity_coeffs, soma_scale_params, device="cuda"
-):
-    """
-    Convert SMPL-X motion data format to SOMA motion data format.
-
-    Note: This is a simple conversion that maps the common parameters.
-    Hand poses and other detailed mappings may require additional processing.
-
-    Args:
-        smplx_motion_data: SMPL-X motion data with 'poses', 'betas', 'trans'
-        soma_identity_coeffs: SOMA identity coefficients (45,)
-        soma_scale_params: SOMA scale parameters (75,)
-        device: Device for computation
-
-    Returns:
-        dict: SOMA motion data format
-    """
-    poses = smplx_motion_data["poses"]
-    trans = smplx_motion_data["trans"]
-
-    if not isinstance(poses, torch.Tensor):
-        poses = torch.tensor(poses, device=device, dtype=torch.float32)
-    if not isinstance(trans, torch.Tensor):
-        trans = torch.tensor(trans, device=device, dtype=torch.float32)
-
-    frame_num = poses.shape[0]
-    poses = poses.reshape(frame_num, -1)
-
-    # Extract global orientation (first 3 values)
-    global_orient = poses[:, :3]
-
-    # SOMA body_pose has 76 joints x 3 = 228 values
-    # SMPL-X body_pose has 21 joints x 3 = 63 values (after global orient)
-    # We need to map SMPL-X joints to SOMA joints
-    # For now, we just initialize SOMA body pose with zeros and copy what we can
-    body_pose = torch.zeros(frame_num, 76, 3, device=device, dtype=torch.float32)
-
-    # Copy body pose from SMPL-X (joints 1-21, which maps to specific SOMA joints)
-    # This is a simplified mapping - actual joint correspondence would need more work
-    smplx_body_pose = poses[:, 3 : 3 + 21 * 3].reshape(frame_num, 21, 3)
-
-    # Rough mapping of SMPL-X body joints to SOMA body joints
-    # SMPL-X: pelvis(0), left_hip(1), right_hip(2), spine1(3), left_knee(4), right_knee(5),
-    #         spine2(6), left_ankle(7), right_ankle(8), spine3(9), left_foot(10), right_foot(11),
-    #         neck(12), left_collar(13), right_collar(14), head(15), left_shoulder(16),
-    #         right_shoulder(17), left_elbow(18), right_elbow(19), left_wrist(20), right_wrist(21)
-    #
-    # SOMA mapping (approximate):
-    # 0: Hips, 1: Spine1, 2: Spine2, 3: Chest, 4-5: Neck, 6: Head
-    # 11: LeftShoulder, 12: LeftArm, 13: LeftForeArm, 14: LeftHand
-    # 39: RightShoulder, 40: RightArm, 41: RightForeArm, 42: RightHand
-    # 67: LeftLeg, 68: LeftShin, 69: LeftFoot, 70: LeftToeBase
-    # 72: RightLeg, 73: RightShin, 74: RightFoot, 75: RightToeBase
-
-    # Simplified mapping (indices adjusted for 0-based indexing in body_pose which excludes root)
-    smplx_to_soma = {
-        0: 67,  # L_Hip -> LeftLeg (adjusted for body_pose indexing)
-        1: 72,  # R_Hip -> RightLeg
-        2: 1,  # Spine1
-        3: 68,  # L_Knee -> LeftShin
-        4: 73,  # R_Knee -> RightShin
-        5: 2,  # Spine2
-        6: 69,  # L_Ankle -> LeftFoot
-        7: 74,  # R_Ankle -> RightFoot
-        8: 3,  # Chest
-        9: 70,  # L_Foot -> LeftToeBase
-        10: 75,  # R_Foot -> RightToeBase
-        11: 4,  # Neck -> Neck1
-        12: 11,  # L_Collar -> LeftShoulder
-        13: 39,  # R_Collar -> RightShoulder
-        14: 6,  # Head
-        15: 12,  # L_Shoulder -> LeftArm
-        16: 40,  # R_Shoulder -> RightArm
-        17: 13,  # L_Elbow -> LeftForeArm
-        18: 41,  # R_Elbow -> RightForeArm
-        19: 14,  # L_Wrist -> LeftHand
-        20: 42,  # R_Wrist -> RightHand
-    }
-
-    for smplx_idx, soma_idx in smplx_to_soma.items():
-        body_pose[:, soma_idx, :] = smplx_body_pose[:, smplx_idx, :]
-
-    # Handle hand poses if present
-    left_hand_pose = smplx_motion_data.get("left_hand_pose", None)
-    right_hand_pose = smplx_motion_data.get("right_hand_pose", None)
-
-    # Note: SOMA and SMPL-X have different hand joint orderings
-    # This would require more careful mapping for accurate hand pose transfer
-
-    soma_motion_data = {
-        "global_orient": global_orient,
-        "body_pose": body_pose,
-        "identity_coeffs": soma_identity_coeffs,
-        "scale_params": soma_scale_params,
-        "transl": trans,
-    }
-
-    return soma_motion_data

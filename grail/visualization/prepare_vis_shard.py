@@ -25,7 +25,7 @@ import numpy as np
 
 # MuJoCo → IsaacLab DOF reordering for G1 29-DOF body joints.
 # Source: imports/SONIC/gear_sonic/envs/manager_env/robots/g1.py
-# Both the retargeting pipeline (GMR) and the data-export pipeline
+# Both the retargeting pipeline and the data-export pipeline
 # (export_successful_rollouts.py, which IsaacLab→MuJoCo-reorders before
 # writing) store DOFs in MuJoCo joint order; batch_render_replay.py uses an
 # IsaacLab articulation, so we always apply this reorder here.

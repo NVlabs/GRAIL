@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Launch GRAIL's portable resident MiniMax-H3 FL2VA service.
-# GPU/container allocation is deliberately owned by the caller (Docker, Slurm,
-# or a local shell); this script only configures Sol-Engine and starts Python.
+# Start the service inside the selected GPU environment.
 set -euo pipefail
 
 usage() {

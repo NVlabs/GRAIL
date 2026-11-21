@@ -1,0 +1,9 @@
+# Terrain material
+newmtl terrain_material
+Ka 0.2 0.2 0.2
+Kd 1.0 1.0 1.0
+Ks 0.1 0.1 0.1
+Ns 10.0
+d 1.0
+illum 2
+map_Kd texture.jpg

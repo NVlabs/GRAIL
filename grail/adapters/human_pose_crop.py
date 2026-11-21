@@ -45,7 +45,7 @@ def ffmpeg_source_indices(source, native):
 def prepare_crop_repair(video, masks, receipt=None, *, timing=None, config=None):
     """Bind completed, original-source SAM2 masks before an estimator cache lookup.
 
-    ``completion.json`` is produced by grail.preprocessing.ord_masks. Old or
+    ``completion.json`` is produced by the source mask exporter. Old or
     unbound masks are rejected instead of silently changing model inputs.
     """
     video = Path(video).resolve(strict=True)

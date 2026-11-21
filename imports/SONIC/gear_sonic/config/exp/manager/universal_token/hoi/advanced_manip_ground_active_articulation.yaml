@@ -1,0 +1,55 @@
+# @package _global_
+#
+# Opt-in active articulated-object training.
+#
+# This preserves advanced_manip_ground_static_context as the default path. The
+# active manipulated link replaces only the legacy rigid Object asset; policy
+# observations, rewards, terminations, actions, and network dimensions remain
+# the GRAIL-aligned single-object versions.
+
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_static_context
+  - _self_
+
+exp_var: advanced_manip_ground_active_articulation
+
+manager_env:
+  config:
+    # Mutually exclusive with the original rigid Object asset.
+    add_object: false
+    active_articulation_usd_path: ""
+
+    active_articulation_collision_enabled: true
+    active_articulation_activate_contact_sensors: true
+    active_articulation_fix_root_link: true
+    active_articulation_enabled_self_collisions: false
+    active_articulation_solver_position_iterations: 8
+    active_articulation_solver_velocity_iterations: 4
+    active_articulation_soft_joint_pos_limit_factor: 1.0
+    active_articulation_max_depenetration_velocity: 1.0
+    active_articulation_root_prim_path: null
+    active_articulation_scale: [1.0, 1.0, 1.0]
+    active_articulation_position: [0.0, 0.0, 0.0]
+    active_articulation_rotation: [1.0, 0.0, 0.0, 0.0]
+    active_articulation_initial_joint_pos:
+      ".*": 0.0
+    active_articulation_initial_joint_vel:
+      ".*": 0.0
+
+    # Launchers override these exact names for each canonical mechanism.
+    active_articulation_tracked_body_name: panel
+    active_articulation_tracked_prim_path: "{ENV_REGEX_NS}/ActiveArticulation/panel"
+    # Null preserves the single-link sensor. A regex can aggregate external
+    # hand contact over several links of one active articulation.
+    active_articulation_contact_prim_path: null
+    active_articulation_reference_joint_names: []
+
+    # Passive context collides with the robot and active mechanism, but does not
+    # create sensors, object slots, padded observations, rewards, or terminations.
+    static_context_collision_enabled: true
+    static_context_activate_contact_sensors: false
+    static_context_kinematic: true
+
+    multi_object_per_env: false
+    enable_multi_object_contact_sensors: false
+    enable_multi_object_support_contact_sensors: false

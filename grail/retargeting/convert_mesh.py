@@ -96,12 +96,12 @@ import contextlib  # noqa: E402
 import os  # noqa: E402
 
 import carb  # noqa: E402
+import isaacsim.core.utils.stage as stage_utils  # noqa: E402
+import omni.kit.app  # noqa: E402
 from isaaclab.sim.converters import MeshConverter, MeshConverterCfg  # noqa: E402
 from isaaclab.sim.schemas import schemas_cfg  # noqa: E402
 from isaaclab.utils.assets import check_file_path  # noqa: E402
 from isaaclab.utils.dict import print_dict  # noqa: E402
-import isaacsim.core.utils.stage as stage_utils  # noqa: E402
-import omni.kit.app  # noqa: E402
 
 
 def main():

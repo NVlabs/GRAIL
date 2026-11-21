@@ -1,0 +1,31 @@
+# @package _global_
+# Source-neutral G1 approximation of a contact-modulated tracking objective.
+defaults:
+  - /exp/manager/universal_token/hoi/advanced_manip_ground_unified_no_vof
+  - _self_
+
+exp_var: advanced_manip_ground_unified_contactfirst
+
+manager_env:
+  rewards:
+    # This family does not use the generic -0.1 body-contact penalty or additive
+    # grasp bonuses. Contact instead modulates motion/object tracking.
+    undesired_contacts_no_ankle_hand: null
+    # The per-hand ordinary reward policy (base yaml) applies in this family too;
+    # object tracking keeps the base kernel/weight and is activated by actual contact OR reference motion
+    # (require_contact=false cannot bypass that activation).
+    object_tracking_reward:
+      params:
+        require_contact: false
+        activation: contact_or_refmotion
+    contact_first_grasp_factor:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:ContactFirstGraspFactor
+      weight: 1.0
+      params:
+        strength: 0.40
+        intent_distance_m: 0.25
+        intent_softness_m: 0.05
+        proximity_sigma_m: 0.05
+        contact_distance_m: 0.04
+        contact_threshold_n: 0.1

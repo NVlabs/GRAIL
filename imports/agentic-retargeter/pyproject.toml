@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-retargeter"
+version = "0.1.0"
+description = "Native robot contact refinement, animation editing, and evidence-based review"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+dependencies = ["numpy>=1.24,<3", "scipy>=1.10,<2", "mujoco>=3.2,<4"]
+
+[project.optional-dependencies]
+experimental = ["osqp==0.6.7.post3"]
+gpu-repair = ["torch>=2.7,<2.8", "warp-lang==1.12.1"]
+compiled-audit = ["numba==0.59.1"]
+video = ["Pillow>=10", "opencv-python>=4.10", "torch>=2.6", "torchvision>=0.21", "transformers>=5.3,<6", "mediapipe>=0.10.32,<2"]
+
+[project.scripts]
+agentic-retargeter = "agentic_retargeter.__main__:main"
+
+[tool.setuptools]
+package-dir = {agentic_retargeter = "src"}
+packages = ["agentic_retargeter", "agentic_retargeter.contact_edit", "agentic_retargeter.contact_edit.experimental"]
+
+[tool.setuptools.package-data]
+"agentic_retargeter.contact_edit.experimental" = ["*.json", "*.md"]

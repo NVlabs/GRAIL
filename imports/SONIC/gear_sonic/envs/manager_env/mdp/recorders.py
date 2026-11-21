@@ -15,6 +15,11 @@ from loguru import logger
 import numpy as np
 import torch
 from tqdm import tqdm
+from gear_sonic.envs.manager_env.mdp import utils
+from gear_sonic.utils.rendering import (
+    camera_pose_with_focus,
+    should_write_render_frame,
+)
 
 if TYPE_CHECKING:
     from isaaclab import envs
@@ -58,13 +63,44 @@ class RenderEnvsRecorderTerm(recorder_manager.RecorderTerm):
         # Get configuration parameters with defaults
         self.group_camera = self.env.wrapper.config.get("group_camera", False)
         self.max_render_envs = self.env.wrapper.config.get("max_render_envs", self.env.num_envs)
+        requested_env_ids = self.env.wrapper.config.get("render_env_ids", None)
+        self.sparse_render_selection = requested_env_ids is not None
         if self.group_camera:
+            if requested_env_ids is not None:
+                raise ValueError("group-camera rendering forbids render_env_ids")
             self.max_render_envs = 1  # single video from overview_camera
-        self.render_frame_skip = self.env.wrapper.config.get("render_frame_skip", 2)
+            self.render_env_ids = None
+        elif requested_env_ids is None:
+            self.render_env_ids = list(range(int(self.max_render_envs)))
+        else:
+            self.render_env_ids = [int(env_id) for env_id in requested_env_ids]
+            if len(self.render_env_ids) != int(self.max_render_envs):
+                raise ValueError(
+                    "max_render_envs must equal the number of render_env_ids"
+                )
+            if self.render_env_ids != sorted(set(self.render_env_ids)):
+                raise ValueError("render_env_ids must be unique and increasing")
+            if (
+                not self.render_env_ids
+                or self.render_env_ids[0] < 0
+                or self.render_env_ids[-1] >= self.env.num_envs
+            ):
+                raise ValueError("render_env_ids lie outside the environment batch")
+        self.render_frame_skip = int(
+            self.env.wrapper.config.get("render_frame_skip", 2)
+        )
+        if self.render_frame_skip <= 0:
+            raise ValueError(
+                f"render frame skip must be positive, got {self.render_frame_skip}"
+            )
+        self.render_skip_first_frame = self.env.wrapper.config.get(
+            "render_skip_first_frame", True
+        )
         self.start_idx = self.env.wrapper.start_idx
 
-        for i in range(self.max_render_envs):
-            file_name = f"{self.save_dir}/{self.start_idx+i:06d}.mp4"
+        writer_env_ids = [0] if self.group_camera else self.render_env_ids
+        for env_id in writer_env_ids:
+            file_name = f"{self.save_dir}/{self.start_idx+env_id:06d}.mp4"
             fps = 1 / (self.env.step_dt * self.render_frame_skip)
             writer = imageio.get_writer(
                 file_name,
@@ -80,14 +116,72 @@ class RenderEnvsRecorderTerm(recorder_manager.RecorderTerm):
         if len(self.video_writers) == 0:
             self._initialize_writers()
 
-        # Check if we should render this frame
+        # Check if we should render this frame. GPC audit renders use skip=1
+        # and retain frame zero so a first-step terminal state cannot vanish.
         if self.frame_id % self.render_frame_skip != 0:
             self.frame_id += 1
             return "record_post_step", torch.ones(self.env.num_envs, 1, device=self.env.device)
 
         # Set camera position based on robot root position
-        root_pos = self.env.command_manager.get_term("motion").robot_body_pos_w[:, 0]
+        root_pos = self.env.scene["robot"].data.root_pos_w
+        if self.sparse_render_selection:
+            root_pos = root_pos[self.render_env_ids]
         camera_offset = self.env.wrapper.config.get("eval_camera_offset", [2, 2, 1])
+        focus_entities = self.env.wrapper.config.get(
+            "eval_camera_focus_entities", None
+        )
+        if focus_entities is None:
+            focus_entity = self.env.wrapper.config.get(
+                "eval_camera_focus_entity", None
+            )
+            focus_entities = [focus_entity] if focus_entity is not None else []
+        focus_pos = None
+        if focus_entities:
+            try:
+                focus_pos = torch.stack(
+                    [
+                        (
+                            self.env.scene[str(entity)].data.root_pos_w
+                            if not self.sparse_render_selection
+                            else self.env.scene[str(entity)].data.root_pos_w[
+                                self.render_env_ids
+                            ]
+                        )
+                        for entity in focus_entities
+                    ],
+                    dim=1,
+                )
+            except (KeyError, AttributeError) as exc:
+                raise RuntimeError(
+                    "eval camera focus entity is unavailable: "
+                    f"{list(focus_entities)!r}"
+                ) from exc
+        runtime_focus_attr = self.env.wrapper.config.get(
+            "eval_camera_runtime_focus_attr", None
+        )
+        if runtime_focus_attr is not None:
+            runtime_focus = getattr(self.env, str(runtime_focus_attr), None)
+            if runtime_focus is None:
+                raise RuntimeError(
+                    "eval camera runtime focus is unavailable: "
+                    f"{runtime_focus_attr!r}"
+                )
+            if self.sparse_render_selection:
+                runtime_focus = runtime_focus[self.render_env_ids]
+            runtime_focus = runtime_focus.unsqueeze(1)
+            focus_pos = (
+                runtime_focus
+                if focus_pos is None
+                else torch.cat((focus_pos, runtime_focus), dim=1)
+            )
+        interaction_eye, interaction_target = camera_pose_with_focus(
+            root_pos,
+            torch.tensor(camera_offset, device=self.env.device),
+            focus_pos=focus_pos,
+            focus_margin_m=float(
+                self.env.wrapper.config.get("eval_camera_focus_margin_m", 1.0)
+            ),
+        )
         fix_camera = self.env.wrapper.config.get("fix_camera_after_first_frame", False)
         cam = self.env.scene["eval_camera"]
 
@@ -102,11 +196,11 @@ class RenderEnvsRecorderTerm(recorder_manager.RecorderTerm):
                 self._fixed_eye = eye.clone()
                 self._fixed_target = center.clone()
         else:
-            eye = root_pos + torch.tensor(camera_offset, device=self.env.device)
-            target = root_pos
+            eye = interaction_eye
+            target = interaction_target
             if fix_camera:
                 self._fixed_eye = eye.clone()
-                self._fixed_target = root_pos.clone()
+                self._fixed_target = target.clone()
 
         # Write world poses to Fabric AND sync to USD so both renderer paths see it
         cam._view._sync_usd_on_fabric_write = True  # noqa: SLF001
@@ -123,33 +217,95 @@ class RenderEnvsRecorderTerm(recorder_manager.RecorderTerm):
 
         # Get RGB data
         rgb_viewer = cam.data.output["rgb"].clone()
+        if (
+            self.sparse_render_selection
+            and int(rgb_viewer.shape[0]) != int(self.max_render_envs)
+        ):
+            raise RuntimeError(
+                "camera tile count differs from selected render environments: "
+                f"{int(rgb_viewer.shape[0])} != {int(self.max_render_envs)}"
+            )
 
         # Get render info if available
         cur_render_info = None
         if self.env.wrapper.config.get("render_info", None) is not None:
-            end_idx = self.start_idx + self.max_render_envs
-            cur_render_info = self.env.wrapper.config.render_info[self.start_idx : end_idx]
+            if self.group_camera:
+                cur_render_info = self.env.wrapper.config.render_info[
+                    self.start_idx : self.start_idx + 1
+                ]
+            else:
+                cur_render_info = [
+                    self.env.wrapper.config.render_info[self.start_idx + env_id]
+                    for env_id in self.render_env_ids
+                ]
 
         # Process each environment, loop over the video writers
-        if self.frame_id >= 1:
+        if should_write_render_frame(
+            self.frame_id,
+            frame_skip=self.render_frame_skip,
+            skip_first_frame=bool(self.render_skip_first_frame),
+        ):
             loop = (
                 tqdm(range(self.max_render_envs))
                 if self.first_render
                 else range(self.max_render_envs)
+            )
+            show_terminal = bool(
+                self.env.wrapper.config.get("render_terminal_overlay", False)
+            )
+            terminal_flags = (
+                (
+                    self.env.reset_buf[:1]
+                    if self.group_camera
+                    else self.env.reset_buf[self.render_env_ids]
+                )
+                .detach()
+                .to(device="cpu", dtype=torch.bool)
+                .tolist()
+                if show_terminal
+                else [False] * self.max_render_envs
+            )
+            text_color = tuple(
+                int(value)
+                for value in self.env.wrapper.config.get(
+                    "render_text_color", [0, 0, 0]
+                )
+            )
+            outline_value = self.env.wrapper.config.get(
+                "render_text_outline_color", None
+            )
+            outline_color = (
+                tuple(int(value) for value in outline_value)
+                if outline_value is not None
+                else None
             )
             for i in loop:
                 frame = rgb_viewer[i].cpu().numpy()
 
                 # Add text overlay if render info is provided
                 if cur_render_info is not None and i < len(cur_render_info):
-                    for j, text in enumerate(cur_render_info[i]):
+                    render_lines = list(cur_render_info[i])
+                    if terminal_flags[i]:
+                        render_lines.append("TERMINAL -> RESET")
+                    for j, text in enumerate(render_lines):
+                        position = (10, 30 + j * 25)
+                        if outline_color is not None:
+                            frame = cv2.putText(
+                                frame,
+                                str(text),
+                                position,
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                outline_color,
+                                3,
+                            )
                         frame = cv2.putText(
                             frame,
                             str(text),
-                            (10, 30 + j * 25),
+                            position,
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.6,
-                            (0, 0, 0),
+                            text_color,
                             1,
                         )
 
@@ -227,7 +383,10 @@ class TrajectoryRecorderTerm(recorder_manager.RecorderTerm):
             self.render_frame_skip = 2
 
         # Detect available scene entities
-        self._has_object = "object" in self.env.scene.rigid_objects
+        self._has_object = (
+            "object" in self.env.scene.rigid_objects
+            or "active_articulation" in self.env.scene.articulations
+        )
         self._has_table = "table" in self.env.scene.rigid_objects
 
         # Get motion command for root pose
@@ -267,6 +426,12 @@ class TrajectoryRecorderTerm(recorder_manager.RecorderTerm):
 
         robot = self.env.scene["robot"]
         env_origins = self.env.scene.env_origins
+        object_pos_w = None
+        object_quat_w = None
+        if self._has_object and self._motion_cmd is not None:
+            object_pos_w, object_quat_w, _, _, _ = utils.get_target_object_current_state(
+                self.env, self._motion_cmd
+            )
 
         for i in range(self.num_record_envs):
             # Joint positions
@@ -286,11 +451,10 @@ class TrajectoryRecorderTerm(recorder_manager.RecorderTerm):
             self._frame_data[i]["root_quat_w"].append(root_quat)
 
             # Object state
-            if self._has_object:
-                obj = self.env.scene["object"]
-                obj_pos = obj.data.root_pos_w[i].cpu().numpy().copy()
+            if object_pos_w is not None:
+                obj_pos = object_pos_w[i].cpu().numpy().copy()
                 obj_pos_rel = obj_pos - env_origins[i].cpu().numpy()
-                obj_quat = obj.data.root_quat_w[i].cpu().numpy().copy()
+                obj_quat = object_quat_w[i].cpu().numpy().copy()
                 self._frame_data[i]["object_pos_w"].append(obj_pos_rel)
                 self._frame_data[i]["object_quat_w"].append(obj_quat)
 

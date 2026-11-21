@@ -39,8 +39,6 @@ class HumanModelConfig:
 
     body_model: str = "soma03"  # Native GEM-X prediction; old types identify archived data
     static_cam: bool = True
-    smplx_model_path: str = ""
-    smplx_shape_params_path: str = ""
     soma_model_path: str = ""
     soma_shape_params_path: str = ""
     soma_identity_params_path: str = ""
@@ -56,12 +54,6 @@ class HumanModelConfig:
     gem_x_human_crop_masks: str | None = None
     gem_x_human_crop_receipt: str | None = None
     gem_x_human_crop_config: dict | None = None
-    gem_smpl_human_crop_repair: bool = False
-    gem_smpl_human_crop_masks: str | None = None
-    gem_smpl_human_crop_receipt: str | None = None
-    gem_smpl_human_crop_config: dict | None = None
-    g1_smplx_params_path: str = ""
-    g1_smplx_tpose_mesh_path: str = ""
 
 
 @dataclass

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GRAIL 3D Assets"
+  short_description: "Generate rigid objects and procedural terrain"
+  default_prompt: "Use $grail-gen3d to generate the requested assets and verify their geometry, scale and materials."

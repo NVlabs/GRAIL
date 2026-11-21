@@ -5,10 +5,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_DIR="$PROJECT_ROOT/imports/soma-retargeter"
-GMR_DIR="$PROJECT_ROOT/imports/GMR"
+ROBOT_XML="$PROJECT_ROOT/assets/robots/unitree_g1/g1_mocap_29dof_with_hands.xml"
 BASE_PYTHON="${GRAIL_BASE_PYTHON:-python}"
 SOURCE_REVISION=cbdb2b494a2af82137bf9b6f15122d60167281c4
-GMR_REVISION=bb1bbe40774794fceb2a7c579a3464a28e68c844
 DEX3_MODEL_SHA256=167280f50c138ac548c03c85f609ddd96e0d994e9f288d6baa42b67617524ec5
 
 while [ "$#" -gt 0 ]; do
@@ -29,24 +28,32 @@ done
     echo "SOMA Retargeter source missing. Run git submodule update --init imports/soma-retargeter." >&2
     exit 1
 }
-[ -f "$GMR_DIR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml" ] || {
-    echo "GMR G1+DEx3 assets are missing. Run git submodule update --init imports/GMR." >&2
-    exit 1
-}
 GIT_SOURCE=(git -c "safe.directory=$SOURCE_DIR" -C "$SOURCE_DIR")
 [ "$("${GIT_SOURCE[@]}" rev-parse HEAD)" = "$SOURCE_REVISION" ] || {
     echo "Expected SOMA Retargeter at $SOURCE_REVISION; update the submodule first." >&2
     exit 1
 }
-GIT_GMR=(git -c "safe.directory=$GMR_DIR" -C "$GMR_DIR")
-[ "$("${GIT_GMR[@]}" rev-parse HEAD)" = "$GMR_REVISION" ] || {
-    echo "Expected GMR at $GMR_REVISION; update the submodule first." >&2
+[ "$(sha256sum "$ROBOT_XML" | cut -d' ' -f1)" = "$DEX3_MODEL_SHA256" ] || {
+    echo "G1+DEx3 model hash differs from the released model." >&2
     exit 1
 }
-[ "$(sha256sum "$GMR_DIR/assets/unitree_g1/g1_mocap_29dof_with_hands.xml" | cut -d' ' -f1)" = "$DEX3_MODEL_SHA256" ] || {
-    echo "GMR G1+DEx3 model hash differs from the released model." >&2
-    exit 1
-}
+# A checkout with unhydrated mesh pointers cannot load the MJCF.
+"$BASE_PYTHON" - "$ROBOT_XML" <<'PYTHON'
+from pathlib import Path
+import struct
+import sys
+import xml.etree.ElementTree as ET
+
+xml = Path(sys.argv[1])
+root = ET.parse(xml)
+mesh_dir = xml.parent / root.find("compiler").attrib["meshdir"]
+for mesh in root.findall(".//asset/mesh[@file]"):
+    path = mesh_dir / mesh.attrib["file"]
+    with path.open("rb") as stream:
+        header = stream.read(84)
+    if len(header) != 84 or path.stat().st_size != 84 + 50 * struct.unpack_from("<I", header, 80)[0]:
+        sys.exit(f"Invalid binary mesh {path}. Run git lfs pull for assets/robots/unitree_g1/meshes.")
+PYTHON
 [ -z "$("${GIT_SOURCE[@]}" status --porcelain --untracked-files=no)" ] || {
     echo "SOMA Retargeter has tracked edits; preserving it without installation." >&2
     exit 1

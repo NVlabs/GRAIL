@@ -51,8 +51,8 @@ def prep_visualizer_input(
     Args:
         hoi_data: Dictionary containing human and object data
         human_model: HumanModel instance. If provided, uses its generate_mesh
-                     which handles G1/SOMA/SMPLX correctly. If None, falls back
-                     to creating a default SMPLX or SOMA model.
+                     which handles the selected SOMA identity correctly. If None, falls back
+                     to creating a legacy SOMA model only for explicitly tagged data.
         normalize_trans: Whether to normalize translation to XY origin
         to_numpy: Whether to convert output to numpy arrays
         device: Device for computation
@@ -68,7 +68,7 @@ def prep_visualizer_input(
     hoi_data = tensor_to(hoi_data, device=device)
 
     human_data = hoi_data["human_data"]
-    model_type = human_data.get("model_type", "smplx")
+    model_type = human_data.get("model_type")
 
     if "trans" in human_data:
         trans = human_data["trans"][:, :3]
@@ -103,12 +103,7 @@ def prep_visualizer_input(
             soma_model, human_data, output_joints=True, require_grad=False, device=device
         )
     else:
-        from grail.models.smplx_model import generate_smplx_mesh, setup_smplx_model
-
-        smplx_model = setup_smplx_model(flat_hand_mean=True, device=device)
-        human_vertices, human_faces, human_joints = generate_smplx_mesh(
-            smplx_model, human_data, output_joints=True, require_grad=False, device=device
-        )
+        raise ValueError(f"Unsupported human model tag: {model_type!r}")
 
     human_vertices = human_vertices - trans_init
     human_joints = human_joints - trans_init

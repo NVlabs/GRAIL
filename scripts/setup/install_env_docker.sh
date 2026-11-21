@@ -10,6 +10,15 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Git checks the mount owner's UID even when the container runs as root.
+# Keep trust local to the container and to repositories used by the workers.
+for repo in "$PROJECT_ROOT" "$PROJECT_ROOT"/imports/{GEM-X,MoGe,MoSE3,soma-retargeter}; do
+    if [[ -e "$repo/.git" && "$(stat -c %u "$repo")" != "$(id -u)" ]] &&
+        ! git config --global --fixed-value --get-all safe.directory "$repo" >/dev/null; then
+        git config --global --add safe.directory "$repo"
+    fi
+done
+
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 
 # Init conda

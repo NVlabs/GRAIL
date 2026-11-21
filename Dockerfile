@@ -37,7 +37,7 @@ RUN conda run -n grail pip install \
 
 # Native SOMA is the default human representation.  uv provisions the pinned
 # Python 3.12 SOMA Retargeter environment after the repo is bind-mounted; its
-# source-bound target generator uses the original GMR G1+DEx3 MJCF and meshes.
+# source-bound target generator uses the bundled Unitree G1+DEx3 MJCF and meshes.
 # Keeping that lockfile environment separate avoids contaminating GRAIL's
 # Python 3.10 dependency set.
 RUN conda run -n grail python -m pip install \

@@ -1,10 +1,10 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# 4D HOI Reconstruction — LOCOMOTION / TERRAIN (native SOMA03 body model)
-#
-# Same as loco_smplx.yaml — only body_model and SMPL-X-specific paths differ.
-# All optimization weights, filters, and post-processing settings are kept in
-# sync with the SMPL-X variant by design.
-# ═══════════════════════════════════════════════════════════════════════════════
+# GEM-X native77 final775 with native SOMA-X 0.3.3 for locomotion/terrain/sitting.
+# Source estimation retains predicted shape and source timing. The separate
+# fixed G1 identity is applied during downstream reconstruction placement.
+# Terrain/seat objects remain static: FoundationPose is bypassed and the filter
+# keeps static-object reconstructions; human losses use native SOMA joints.
+# The existing numerical Stage 1 requires reviewed finite terrain support.
+# Missing support inputs are errors; zero-iteration probes do not fit.
 
 # ── Directory paths ───────────────────────────────────────────────────────────
 paths:
@@ -29,6 +29,7 @@ human_model:
   gem_x_python: "imports/GEM-X/.venv/bin/python"
   gem_x_device: cuda
   gem_x_postprocess: false
+  # Bind source SAM2 masks before native77 observations and Body Pose features.
   gem_x_human_crop_repair: true
   gem_x_human_crop_config:
     max_crop_scale: 3.0
@@ -49,12 +50,12 @@ obj_pose_tracking:
 
 # ── Optimization config (passed to HOIOptimizer) ─────────────────────────────
 optimization:
+  foot_support_mode: terrain  # Fixed by the locomotion config family.
   log_dir: "logs"
   exp_name: "static_cam"
   use_global: False
 
-  cache_list:
-    - contact_labels
+  cache_list: []
 
   vis_cfg:
     vis_init: false
@@ -65,6 +66,8 @@ optimization:
     export_mesh: false
     vis_html: true
     vis_contact: true
+    vis_foot_contact: true
+    foot_contact_threshold: 0.4
 
   opt_stage_specs:
     init_opt:
@@ -74,15 +77,16 @@ optimization:
         human_trans_res:
           lr: 0.003
         human_pose_res:
-          lr: 0.0001
+          lr: 0.001
         obj_t_res:
           lr: 0.003
         obj_R_res:
           lr: 0.0001
-      niter: 600
+      niter: 400
       loss_cfg:
         keypoint_tracking:
           weight: 0.3
+          confidence_threshold: 0.9  # Strict >; native77 raw heatmap scores (not probabilities)
           beta: 0.1
         human_smoothness:
           weight: 30.0
@@ -90,9 +94,23 @@ optimization:
         human_pose_reg:
           weight: 100.0
         human_foot_contact:
-          weight: 10.0
+          weight: 30.0
+          label_source: scene_support  # Same reviewed intervals as tread support.
+          point_mode: foot_parts
+          velocity_space: planar
+          options:
+            fps: source
+            normal_velocity_weight: 0.0
+            long_horizon_lag: 4
+            long_horizon_weight: 0.25
+            tangent_blend_frames: 3
         human_global_init_reg:
           weight: 3000.0
+          mode: root_relative_velocity
+          relative_frame: root  # Full inverse root rotation before frame differences
+          root_joint_index: 0  # Native SOMA Hips; all other 76 joints included
+          root_speed_weight: 1.0
+          joint_velocity_weight: 1.0
         verts_tracking:
           weight: 0.3
         obj_smoothness:
@@ -104,17 +122,40 @@ optimization:
           num_gt_samples: 3000
           trim_pct: 0.2
           depth_tol: 0.02
+        human_scene_support:
+          weight: 300.0
+          penetration_weight: 2.0
+          support_weight: 1.0
+          tangent_weight: 2.0
+          boundary_weight: 1.0
+          robust_delta_m: 0.005
+          height_blend_frames: 0
+          tangent_blend_frames: 3
+        human_scene_support_temporal:
+          weight: 1.0
+          component_weights:
+            no_slip: 0.0
+            window_velocity: 0.1
+            window_acceleration: 0.1
+          options:
+            fps: source
+            window_frames: 4
+            velocity_scale_mps: 0.35
+            acceleration_scale_mps2: 3.0
+            correction_speed_tolerance_mps: 0.15
+            acceleration_tolerance_mps2: 3.0
+            normal_velocity_weight: 0.25
+            long_horizon_lag: 4
+            long_horizon_weight: 0.25
+            tangent_blend_frames: 3
 
   eval:
     keypoint_tracking:
       weight: 0.1
+      confidence_threshold: 0.9
       beta: 0.1
       threshold: 2.0
-    contact:
-      weight: 100000.0
-      duration: "all"
-      threshold: 5.0
-      max_contact_dist: 0.15
+    # Hand-object VLM contact evaluation removed. Foot-contact terms stay above.
 
 # ── Filtering config ────────────────────────────────────────
 filtering:
@@ -123,7 +164,7 @@ filtering:
   total_mask_tol: 0.3
   human_static_thr: 0.01
   min_frames: null
-  filter_object_motion: "static_only"  # LOCO: keep only static-object recons
+  filter_object_motion: "static_only"  # LOCO: keep only static-object recons (terrain, sitting)
   object_static_thr: 0.02
 
 # ── Post-processing config ────────────────────────────────────────

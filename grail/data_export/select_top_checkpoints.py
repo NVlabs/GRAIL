@@ -15,16 +15,16 @@ already the terrain-relevant metric — no per-category slice needed.
 Usage:
     # Single run
     python -m grail.data_export.select_top_checkpoints \\
-        --run nv-gear/TRL_G1_Track/s9ytglce --k 5
+        --run ENTITY/PROJECT/RUN_ID --k 5
 
     # W&B group (picks the finished run with the most eval rows)
     python -m grail.data_export.select_top_checkpoints \\
-        --group tnf_terrain_full_nodr_2604172213 --k 5
+        --entity ENTITY --project PROJECT --group GROUP_NAME --k 5
 
     # Write JSON output
     python -m grail.data_export.select_top_checkpoints \\
-        --group tnf_terrain_full_nodr_2604172213 --k 5 \\
-        --out out/grail-data-export/tnf_top5.json
+        --entity ENTITY --project PROJECT --group GROUP_NAME --k 5 \\
+        --out out/top_checkpoints.json
 """
 
 import argparse
@@ -33,8 +33,6 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_ENTITY = "nv-gear"
-DEFAULT_PROJECT = "TRL_G1_Track"
 SR_KEY = "eval/success/success_rate"
 MPJPE_L_KEY = "eval/all/mpjpe_l"
 MPJPE_G_KEY = "eval/all/mpjpe_g"
@@ -48,10 +46,10 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--run", help="W&B run path, e.g. nv-gear/TRL_G1_Track/s9ytglce")
+    src.add_argument("--run", help="W&B run path, e.g. ENTITY/PROJECT/RUN_ID")
     src.add_argument("--group", help="W&B group name; picks the best finished run in the group")
-    p.add_argument("--entity", default=DEFAULT_ENTITY)
-    p.add_argument("--project", default=DEFAULT_PROJECT)
+    p.add_argument("--entity", help="Account or team for a group or short run ID")
+    p.add_argument("--project", help="Project for a group or short run ID")
     p.add_argument("--k", type=int, default=5, help="Top-K checkpoints (default: 5)")
     p.add_argument("--hoi", action="store_true",
                    help="HOI experiment: tiebreak on obj_pos_error (asc) instead of mpjpe_l")
@@ -72,7 +70,13 @@ def parse_args():
         "--samples", type=int, default=5000,
         help="Max history rows to fetch per run (default: 5000)",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.run and "/" in args.run:
+        if len(args.run.split("/")) != 3 or not all(args.run.split("/")):
+            p.error("--run expects ENTITY/PROJECT/RUN_ID or a short run ID")
+    elif not (args.entity and args.project):
+        p.error("--entity and --project are required for a group or short run ID")
+    return args
 
 
 def _import_wandb():

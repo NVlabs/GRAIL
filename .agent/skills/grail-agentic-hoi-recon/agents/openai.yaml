@@ -1,0 +1,4 @@
+interface:
+  display_name: "GRAIL Agentic HOI Reconstruction"
+  short_description: "Agentic human-object reconstruction with source-video contact review"
+  default_prompt: "Use $grail-agentic-hoi-recon to inspect the source video, author per-hand contacts, run Stage 1, Blender placement and Stage 2 with native edits and review, then save the human/object handoff."

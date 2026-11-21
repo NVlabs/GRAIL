@@ -1,3 +1,4 @@
+import hashlib
 import os
 import pickle
 import subprocess
@@ -7,6 +8,8 @@ from glob import glob
 import imageio
 import numpy as np
 from tqdm import tqdm
+
+from .video import normalize_motion_fps
 
 try:
     import torch
@@ -47,7 +50,7 @@ def vis_keypoints_data(video_path, vitpose, hand_keypoints_2d, cache_dir):
 
     # Read video frames
     reader = imageio.get_reader(video_path)
-    fps = reader.get_meta_data().get("fps", 30)
+    fps = normalize_motion_fps(reader.get_meta_data().get("fps"))
     frames = []
     for frame in reader:
         frames.append(frame)
@@ -277,7 +280,7 @@ def vis_keypoints_data(video_path, vitpose, hand_keypoints_2d, cache_dir):
                         pt = (int(kp[0]), int(kp[1]))
                         cv2.circle(frame, pt, 5, (0, 0, 255), -1)
 
-        # Draw hand keypoints (only meaningful for SMPLX; SOMA hand kpts are in vitpose)
+        # Draw separate hand detections when supplied.
         if hand_keypoints_2d is not None and not is_soma77:
             if isinstance(hand_keypoints_2d, dict):
                 # Handle dict format with 'left' and 'right' keys
@@ -395,10 +398,10 @@ def save_human_motion_data(motion_global, motion_incam, output_path):
 
 
 def load_human_motion_data(
-    hmr_file_path, model="smplx", is_global=False, to_tensor=False, device="cuda"
+    hmr_file_path, model="soma03", is_global=False, to_tensor=False, device="cuda"
 ):
     """
-    Load SMPL motion data from a file
+    Load native SOMA motion data from a file
 
     Args:
         hmr_file_path (str): Path to the .npz file containing motion data
@@ -406,15 +409,12 @@ def load_human_motion_data(
         dict: Dictionary containing motion data
     """
 
+    if model not in ("soma03", "soma"):
+        raise ValueError(f"Unsupported human motion model: {model!r}")
     if not os.path.exists(hmr_file_path):
-        raise FileNotFoundError(f"SMPL motion file not found: {hmr_file_path}")
-
-    smpl_data = np.load(hmr_file_path, allow_pickle=True)
-
-    if is_global:
-        motion_data = smpl_data["motion_global"].item()
-    else:
-        motion_data = smpl_data["motion_incam"].item()
+        raise FileNotFoundError(f"SOMA motion file not found: {hmr_file_path}")
+    with np.load(hmr_file_path, allow_pickle=True) as archive:
+        motion_data = archive["motion_global" if is_global else "motion_incam"].item()
 
     if to_tensor:
         motion_data = tensor_to(motion_data, device)
@@ -535,15 +535,92 @@ def load_init_rendering_data(
         if "static_objects" in init_rendering_data:
             additional_data["static_objects"] = init_rendering_data["static_objects"]
             if to_tensor:
-                for obj_key, obj_data in additional_data["static_objects"].items():
-                    obj_data["scale"] = torch.from_numpy(obj_data["scale"]).float().to(device)
-                    obj_data["rot"] = torch.from_numpy(obj_data["rot"]).float().to(device)
-                    obj_data["pos"] = torch.from_numpy(obj_data["pos"]).float().to(device)
+                for obj_data in additional_data["static_objects"].values():
+                    # Convert geometry, preserving integer topology and nested provenance.
+                    for key in ("scale", "rot", "pos", "vertices"):
+                        if key in obj_data:
+                            obj_data[key] = torch.as_tensor(
+                                obj_data[key], dtype=torch.float32, device=device
+                            )
+                    if "faces" in obj_data:
+                        obj_data["faces"] = torch.as_tensor(
+                            obj_data["faces"], dtype=torch.int64, device=device
+                        )
 
     if with_human_data or with_scene_data:
         return obj_R, obj_t, obj_scale, cam_R, cam_t, render_config, additional_data
     else:
         return obj_R, obj_t, obj_scale, cam_R, cam_t, render_config
+
+
+def serialize_support_objects(support_objects, source_blend_path):
+    """Embed explicitly selected, unmodified Blender meshes in world coordinates.
+
+    No evaluated mesh or transform decomposition is used: the original vertices
+    and Blender loop triangles are transformed by the full matrix_world, including
+    any parent transform or shear. The source file and original matrix remain
+    available for provenance. This helper does not change scene placement.
+    """
+    if not support_objects:
+        return {}
+    if not source_blend_path or not os.path.isfile(source_blend_path):
+        raise ValueError("Selected support objects require an existing source .blend file")
+    source_blend_path = os.path.realpath(source_blend_path)
+    source_hash = hashlib.sha256()
+    with open(source_blend_path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            source_hash.update(chunk)
+
+    serialized = {}
+    for name, obj in support_objects.items():
+        if obj is None or obj.name != name or obj.type != "MESH":
+            raise ValueError(f"Selected support object {name!r} must be an existing named mesh")
+        current = obj
+        while current is not None:
+            rigid_body = getattr(current, "rigid_body", None)
+            if (
+                getattr(current, "animation_data", None)
+                or getattr(current, "constraints", ())
+                or getattr(current, "modifiers", ())
+                or (rigid_body is not None and rigid_body.type != "PASSIVE")
+            ):
+                raise ValueError(f"Support object {name!r} has non-static or modified ancestry")
+            current = getattr(current, "parent", None)
+        mesh = obj.data
+        if (
+            getattr(mesh, "animation_data", None)
+            or getattr(mesh, "shape_keys", None)
+            or getattr(obj, "is_instancer", False)
+        ):
+            raise ValueError(f"Support object {name!r} has animated or instanced geometry")
+        matrix = np.array(obj.matrix_world, dtype=np.float64).reshape(4, 4)
+        if not np.isfinite(matrix).all() or not np.allclose(matrix[3], [0, 0, 0, 1]):
+            raise ValueError(f"Support object {name!r} has an invalid world transform")
+        mesh.calc_loop_triangles()
+        vertices = np.array([vertex.co[:] for vertex in mesh.vertices], dtype=np.float64)
+        faces = np.array([triangle.vertices[:] for triangle in mesh.loop_triangles], dtype=np.int64)
+        if (
+            vertices.ndim != 2
+            or vertices.shape[1] != 3
+            or not np.isfinite(vertices).all()
+            or faces.ndim != 2
+            or faces.shape[1] != 3
+            or faces.min() < 0
+            or faces.max() >= len(vertices)
+        ):
+            raise ValueError(f"Support object {name!r} has invalid or empty mesh geometry")
+        serialized[name] = {
+            "vertices": vertices @ matrix[:3, :3].T + matrix[:3, 3],
+            "faces": faces,
+            "pos": np.zeros(3),
+            "rot": np.eye(3),
+            "scale": np.ones(3),
+            "source_matrix_world": matrix,
+            "source_blend": {"path": source_blend_path, "sha256": source_hash.hexdigest()},
+            "source_object": name,
+            "role": "support",
+        }
+    return serialized
 
 
 def save_init_rendering_data(
@@ -560,6 +637,8 @@ def save_init_rendering_data(
     character_t,
     character_scale,
     static_objects,
+    support_objects=None,
+    source_blend_path=None,
 ):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
@@ -585,6 +664,15 @@ def save_init_rendering_data(
                 "rot": np.array(obj.rotation_euler.to_matrix()).reshape((3, 3)),
                 "scale": np.array(obj.scale).reshape((3,)),
             }
+
+    if support_objects:
+        scene_objects = init_rendering_data.setdefault("static_objects", {})
+        overlap = scene_objects.keys() & support_objects.keys()
+        if overlap:
+            raise ValueError(
+                f"Support object keys duplicate imported static objects: {sorted(overlap)}"
+            )
+        scene_objects.update(serialize_support_objects(support_objects, source_blend_path))
 
     with open(save_path, "wb") as handle:
         pickle.dump(init_rendering_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -662,9 +750,7 @@ def load_mesh(mesh_path, mesh_scale=None, target_num_verts=None, device="cuda"):
             try:
                 # trimesh 4.x: first positional arg is `percent` (0-1); use
                 # face_count kwarg to pass a target face count directly.
-                trimesh_mesh = trimesh_mesh.simplify_quadric_decimation(
-                    face_count=target_faces
-                )
+                trimesh_mesh = trimesh_mesh.simplify_quadric_decimation(face_count=target_faces)
                 print(
                     f"Simplified to {len(trimesh_mesh.vertices)} vertices, {len(trimesh_mesh.faces)} faces"
                 )

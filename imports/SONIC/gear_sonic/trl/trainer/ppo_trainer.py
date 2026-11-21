@@ -1,6 +1,6 @@
 """PPO trainer adapted from HuggingFace TRL for humanoid whole-body control."""
 
-import gc  # noqa: F401
+import gc
 import math
 import os
 
@@ -8,6 +8,10 @@ import accelerate
 from accelerate import utils as accelerate_utils
 import numpy as np
 import torch
+
+from gear_sonic.trl.trainer.hotpath_ops import nonfinite_update_skip, normalize_advantages_distributed, packed_means
+
+from gear_sonic.utils import cuda_memory_debug
 from torch import nn
 from transformers import utils as transformers_utils
 from transformers.trainer import *  # noqa: F403
@@ -61,10 +65,23 @@ from gear_sonic.trl.utils import (
     rl,
     scheduler,
 )
+from gear_sonic.trl.utils.episode_statistics import (  # noqa: E402
+    episode_window_sum_and_count,
+)
+from gear_sonic.trl.utils.resume_completion import ALREADY_COMPLETE_MARKER, training_already_complete
 from gear_sonic.utils import average_meters  # noqa: E402
 
 console_ = console.Console()
 import time  # noqa: E402
+
+
+
+def _needs_attnmask(model) -> bool:
+    """Compute the episode attention mask only for backbones that consume it (MLP backbones ignore every kwarg;
+    no per-update work PPO does not need). Unknown models keep the mask."""
+    if model is None:
+        return False
+    return bool(getattr(model, "needs_episode_attnmask", True))
 
 
 class PolicyAndValueWrapper(nn.Module):
@@ -745,7 +762,6 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.num_steps_per_env = self.config.num_steps_per_env
         self.use_padding_mask = self.config.get("use_padding_mask", False)
         self.ppo_shuffle_every_epoch = self.config.get("ppo_shuffle_every_epoch", True)
-        self.empty_cache_every_n_ppo_epoch = self.config.get("empty_cache_every_n_ppo_epoch", -1)
 
         self.entropy_coef = self.config.entropy_coef
         self.desired_kl = self.config.desired_kl
@@ -757,10 +773,162 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.multi_critic_advantage_weights = self.config.get(
             "multi_critic_advantage_weights", None
         )
+        dual_critic_cfg = self.config.get("dual_critic", {}) or {}
+        self.dual_critic_enabled = bool(dual_critic_cfg.get("enabled", False))
+        self.dual_critic_phase_key = dual_critic_cfg.get("phase_obs_key", "contact_phase")
+        self.dual_critic_phase_mode = dual_critic_cfg.get("mode", "phase_blend")
+        self.dual_critic_tracking_floor = float(dual_critic_cfg.get("tracking_floor", 0.0))
+        self.dual_critic_interaction_floor = float(dual_critic_cfg.get("interaction_floor", 0.0))
+        if self.dual_critic_enabled and self.num_critics != 2:
+            raise ValueError(
+                "dual_critic.enabled=true expects exactly two reward/value channels: "
+                f"got num_critics={self.num_critics}"
+            )
+        if self.dual_critic_enabled:
+            self.accelerator.print(
+                "[TRLPPOTrainer] dual_critic enabled: "
+                f"mode={self.dual_critic_phase_mode}, phase_key={self.dual_critic_phase_key}, "
+                f"tracking_floor={self.dual_critic_tracking_floor}, "
+                f"interaction_floor={self.dual_critic_interaction_floor}"
+            )
 
         self.compute_imgaug_bc_loss = self.config.get("compute_imgaug_bc_loss", False)
         self.imgaug_bc_loss_coef = self.config.get("imgaug_bc_loss_coef", 1.0)
         self.imgaug_bc_loss_fn = torch.nn.MSELoss()
+
+        # Opt-in engineering flags for reducing host synchronization on the PPO
+        # hot path. Every flag defaults to the recorded baseline behaviour when absent.
+        #   host_probe_batching: fused finite-gradient check, one device->host
+        #       transfer for the adaptive-KL comparisons + loss NaN/Inf guard, and
+        #       device-side SONIC-LoRA logging accumulators (same decisions, same
+        #       logged values, fewer blocking synchronizations per micro-batch).
+        #   deferred_rollout_episode_stats: stage done-episode reward sums /
+        #       lengths on device and flush them to the rew/len deques once per
+        #       rollout instead of twice per step (identical deque contents).
+        #   storage_skip_unused_obs: do not register/copy/fetch rollout obs groups
+        #       that nothing reads back from RolloutStorage (actor/critic/LoRA
+        #       declared keys are always kept; storage_extra_obs_keys force-keeps).
+        #   perf_timing_log: one '[PERF]' line per update separating collection,
+        #       learning, logging, gc and callback (save) wall time.
+        self.host_probe_batching = bool(self.config.get("host_probe_batching", False))
+        self.deferred_rollout_episode_stats = bool(
+            self.config.get("deferred_rollout_episode_stats", False)
+        )
+        self.storage_skip_unused_obs = bool(self.config.get("storage_skip_unused_obs", False))
+        extra_storage_keys = self.config.get("storage_extra_obs_keys", None) or []
+        self._storage_extra_obs_keys = {str(key) for key in extra_storage_keys}
+        self._storage_obs_keys = None
+        self.perf_timing_log = bool(self.config.get("perf_timing_log", False))
+        # Rank identity for the PERF line: stdout of all ranks is merged in one job log, so
+        # the line carries the already-known process index (no synchronization, no new timer).
+        self._perf_rank = int(getattr(self.accelerator, "process_index", 0))
+        # perf_rollout_phase_timing: temporary diagnostic (slow-rank investigation), OFF by default and only active
+        # together with perf_timing_log. When off, none of the phase clock reads, dict construction or formatting runs.
+        self.perf_rollout_phase_timing = bool(
+            self.perf_timing_log and self.config.get("perf_rollout_phase_timing", False)
+        )
+        self._perf_rollout_phases: dict | None = None
+
+        self.accelerator.print(
+            "[TRLPPOTrainer] perf_migration flags: "
+            f"host_probe_batching={self.host_probe_batching} "
+            f"deferred_rollout_episode_stats={self.deferred_rollout_episode_stats} "
+            f"storage_skip_unused_obs={self.storage_skip_unused_obs} "
+            f"storage_extra_obs_keys={sorted(self._storage_extra_obs_keys)} "
+            f"perf_timing_log={self.perf_timing_log}"
+        )
+
+
+    def _perf_rollout_phase_fields(self) -> str:
+        """PERF suffix: host wall-clock intervals of the last _rollout_step split at the existing deferred-episode-stats
+        flush (timestamps only). They localize where host wall time accumulates; they are NOT a GPU-vs-CPU attribution."""
+        phases = self._perf_rollout_phases
+        if not phases:
+            return ""
+        return (
+            f" rollout_issue_s={phases['rollout_issue_s']:.4f} stats_flush_s={phases['stats_flush_s']:.4f}"
+            f" post_rollout_s={phases['post_rollout_s']:.4f} flush={'1' if phases['flush_present'] else '0'}"
+        )
+
+    def _resolve_storage_obs_keys(self):
+        """Obs keys with an actual RolloutStorage read-back consumer, or None to store all.
+
+        Storage read-back consumers under this trainer are: the policy forward in
+        the PPO update (``actor_obs`` plus any key the actor declares through
+        ``storage_required_obs_keys``, e.g. the SONIC-LoRA actor's ``policy_atm``
+        proprioception), the critic in the GAE pass and the update
+        (``critic_obs``), the dual-critic phase weighting and the contact-phase
+        std modulation (their obs keys), and vision buffers when configured.
+        Groups such as ``tokenizer`` are consumed LIVE inside ``env.step`` from
+        ``policy_state_dict["obs_dict"]`` and are never read back from storage.
+        ``extra_rollout_keys`` (e.g. ``sonic_code``) are registered separately and
+        are not affected by this whitelist.
+        """
+        if not self.storage_skip_unused_obs:
+            return None
+        keys = {"actor_obs", "critic_obs"}
+        keys |= {"vision_obs", "camera_rgb", "height_map"} & set(self.algo_obs_dim_dict.keys())
+        if self.dual_critic_enabled:
+            keys.add(str(self.dual_critic_phase_key))
+        policy = self.policy_model
+        if getattr(policy, "contact_phase_std_enabled", False):
+            keys.add(str(getattr(policy, "contact_phase_std_obs_key", "contact_phase")))
+        required = {str(key) for key in (getattr(policy, "storage_required_obs_keys", None) or ())}
+        missing = sorted(key for key in required if key not in self.algo_obs_dim_dict)
+        if missing:
+            raise ValueError(
+                "storage_skip_unused_obs: the policy requires obs groups that the "
+                f"environment does not provide: {missing}"
+            )
+        keys |= required
+        keys |= self._storage_extra_obs_keys
+        return keys
+
+    def _storage_stores_obs_key(self, key):
+        """True when ``key`` must be written to / read from RolloutStorage."""
+        return self._storage_obs_keys is None or key in self._storage_obs_keys
+
+    def _contact_phase_for_advantage(self, mb_obs_dict, mb_advantage):
+        if self.dual_critic_phase_key not in mb_obs_dict:
+            raise KeyError(
+                f"dual_critic needs observation key '{self.dual_critic_phase_key}'. "
+                "Enable manager_env.config.rp2_contact_phase_obs.enabled=true."
+            )
+        phase = mb_obs_dict[self.dual_critic_phase_key].to(mb_advantage)
+        if phase.shape[-1] > 1:
+            phase = phase.max(dim=-1, keepdim=True).values
+        if phase.ndim == 2:
+            phase = phase.unsqueeze(-1)
+        phase = torch.clamp(phase, min=0.0, max=1.0)
+        if phase.shape[:2] != mb_advantage.shape[:2]:
+            phase = phase.expand(mb_advantage.shape[0], mb_advantage.shape[1], phase.shape[-1])
+        return phase
+
+    def _compose_dual_critic_advantage(self, mb_obs_dict, mb_advantage):
+        if not self.dual_critic_enabled:
+            return mb_advantage
+        if mb_advantage.shape[-1] != 2:
+            raise ValueError(
+                "dual_critic expects mb_advantage[..., 2] for tracking/contact channels, "
+                f"got {tuple(mb_advantage.shape)}"
+            )
+        phase = self._contact_phase_for_advantage(mb_obs_dict, mb_advantage)
+        tracking_w = torch.clamp(1.0 - phase, min=self.dual_critic_tracking_floor)
+        interaction_w = torch.clamp(phase, min=self.dual_critic_interaction_floor)
+        weights = torch.cat([tracking_w, interaction_w], dim=-1)
+        if self.dual_critic_phase_mode == "max":
+            selected = torch.stack(
+                [mb_advantage[..., 0], mb_advantage[..., 1]], dim=-1
+            )
+            winner = selected.argmax(dim=-1, keepdim=True)
+            return torch.zeros_like(mb_advantage).scatter_(-1, winner, selected.gather(-1, winner))
+        if self.dual_critic_phase_mode == "min":
+            selected = torch.stack(
+                [mb_advantage[..., 0], mb_advantage[..., 1]], dim=-1
+            )
+            winner = selected.argmin(dim=-1, keepdim=True)
+            return torch.zeros_like(mb_advantage).scatter_(-1, winner, selected.gather(-1, winner))
+        return mb_advantage * weights
 
     def _setup_storage(self):
         """Allocate rollout storage buffers and episode tracking accumulators.
@@ -773,7 +941,18 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self.env.num_envs, self.num_steps_per_env, device=self.accelerator.device
         )
         ## Register obs keys
+        self._storage_obs_keys = self._resolve_storage_obs_keys()
+        if self._storage_obs_keys is not None:
+            skipped = sorted(set(self.algo_obs_dim_dict.keys()) - self._storage_obs_keys)
+            self.accelerator.print(
+                "[TRLPPOTrainer] storage_skip_unused_obs: storing obs groups "
+                f"{sorted(k for k in self.algo_obs_dim_dict if k in self._storage_obs_keys)}; "
+                f"not storing {skipped} (no RolloutStorage consumer; ATM groups are "
+                "consumed live in env.step)"
+            )
         for obs_key, obs_dim in self.algo_obs_dim_dict.items():
+            if not self._storage_stores_obs_key(obs_key):
+                continue
             obs_shape = (obs_dim,) if isinstance(obs_dim, int) else tuple(obs_dim)
             if obs_key in ["vision_obs", "camera_rgb"]:
                 # Vision observations are stored as [H, W, C] image, not flattened
@@ -796,6 +975,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.storage.register_key("actions_log_prob", shape=(1,), dtype=torch.float)
         self.storage.register_key("action_mean", shape=(self.num_act,), dtype=torch.float)
         self.storage.register_key("action_sigma", shape=(self.num_act,), dtype=torch.float)
+        # Policy-specific per-step tensors (e.g. stored SONIC codes for the LoRA arm).
+        for key, shape in getattr(self.policy_model, "extra_rollout_keys", {}).items():
+            self.storage.register_key(key, shape=tuple(shape), dtype=torch.float)
 
         if self.learn_normalized_actions:
             self.storage.register_key(
@@ -844,7 +1026,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 .squeeze(-1)
                 .transpose(0, 1)
             )
-            episode_attnmask = rl.compute_episode_attnmask(dones)
+            episode_attnmask = rl.compute_episode_attnmask(dones) if _needs_attnmask(policy_model) else None
         else:
             episode_attnmask = None
 
@@ -911,12 +1093,28 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             The final observation dict after the last environment step,
             to be used as the starting point for the next rollout.
         """
+        _phase_timing = self.perf_rollout_phase_timing  # diagnostic only; nothing below runs when it is off
+        _phase_t0 = time.perf_counter() if _phase_timing else 0.0
         self._train_rollout_mode()
         device = self.accelerator.device
         policy_model = model.policy
         value_model = model.value_model
         policy_model.init_rollout()
         self.storage.clear()
+
+        # The legacy length metric retains only the last 100 completed episodes.
+        # Keep exact rollout-wide sums so short, frequently completing failures do
+        # not obscure the timeout/failure split in large vectorized environments.
+        # Layout: all length/count, timeout length/count, failure length/count.
+        rollout_episode_stats = torch.zeros(6, device=device, dtype=torch.float64)
+
+        # deferred_rollout_episode_stats: per-step done-episode reward sums / lengths
+        # are staged on device and flushed with ONE .cpu() after the loop instead
+        # of two blocking copies per step. Nothing reads state.rewbuffer/lenbuffer
+        # inside the loop, and advanced indexing returns copies, so the deque
+        # contents at every read point are identical to the per-step extends.
+        rollout_done_reward_sums: list[torch.Tensor] = []
+        rollout_done_lengths: list[torch.Tensor] = []
 
         dones = torch.zeros(self.env.num_envs, device=device)
         with torch.no_grad():
@@ -927,6 +1125,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
                 # Append states to storage
                 for key, value in obs_dict.items():
+                    if not self._storage_stores_obs_key(key):
+                        continue
                     if key == "height_map":
                         if getattr(self.storage, key).ndim != 5:
                             # re-register height_map
@@ -977,23 +1177,69 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 self._process_env_step(rewards, dones, infos)
                 self.cur_reward_sum += rewards_stored
                 self.cur_episode_length += 1
-                new_ids = (dones > 0).nonzero(as_tuple=False)
-                self.state.rewbuffer.extend(self.cur_reward_sum[new_ids].cpu().numpy().tolist())
-                self.state.lenbuffer.extend(self.cur_episode_length[new_ids].cpu().numpy().tolist())
+                done_mask = dones > 0
+                completed_lengths = self.cur_episode_length[done_mask].to(torch.float64)
+                if completed_lengths.numel() > 0:
+                    timeout_mask = infos["time_outs"].to(device=device, dtype=torch.bool)[
+                        done_mask
+                    ]
+                    failure_mask = ~timeout_mask
+                    rollout_episode_stats[0] += completed_lengths.sum()
+                    rollout_episode_stats[1] += completed_lengths.numel()
+                    rollout_episode_stats[2] += completed_lengths[timeout_mask].sum()
+                    rollout_episode_stats[3] += timeout_mask.sum()
+                    rollout_episode_stats[4] += completed_lengths[failure_mask].sum()
+                    rollout_episode_stats[5] += failure_mask.sum()
+
+                new_ids = done_mask.nonzero(as_tuple=False)
+                if self.deferred_rollout_episode_stats:
+                    # Stage on device (indexing copies); flushed once after the loop.
+                    rollout_done_reward_sums.append(self.cur_reward_sum[new_ids])
+                    rollout_done_lengths.append(self.cur_episode_length[new_ids])
+                else:
+                    self.state.rewbuffer.extend(
+                        self.cur_reward_sum[new_ids].cpu().numpy().tolist()
+                    )
+                    self.state.lenbuffer.extend(
+                        self.cur_episode_length[new_ids].cpu().numpy().tolist()
+                    )
                 self.cur_reward_sum[new_ids] = 0
                 self.cur_episode_length[new_ids] = 0
 
+            _phase_t1 = time.perf_counter() if _phase_timing else 0.0
+            if self.deferred_rollout_episode_stats and rollout_done_reward_sums:
+                # torch.cat preserves the exact append order (step order; ascending
+                # env id within a step from nonzero), so the deque contents match the
+                # sequential per-step extends element for element, including the
+                # maxlen=100 eviction.
+                self.state.rewbuffer.extend(
+                    torch.cat(rollout_done_reward_sums, dim=0).cpu().numpy().tolist()
+                )
+                self.state.lenbuffer.extend(
+                    torch.cat(rollout_done_lengths, dim=0).cpu().numpy().tolist()
+                )
+            # Host wall-clock intervals around the ONE existing device->host copy of the rollout (when it happens):
+            # rollout_issue_s = host time of the step loop before the flush (includes any waits/implicit syncs inside
+            # the loop, not a pure CPU issue cost); stats_flush_s = host time of the torch.cat + .cpu() + list copies
+            # (includes but is not only the device backlog); with flush=0 nothing synchronizes here and the boundary is
+            # NOT a device-completion boundary. Timestamps only; no synchronize, no collective, no extra transfer.
+            _phase_t2 = time.perf_counter() if _phase_timing else 0.0
+
+            self._last_rollout_episode_stats = rollout_episode_stats
+
             policy_model.clear_rollout()
-            # gc.collect()
-            # torch.cuda.empty_cache()
 
             if self.value_model is not None:
-                dones = self.storage.query_key("dones").to(device).squeeze(-1).transpose(0, 1)
-                dones = torch.cat([dones, torch.zeros_like(dones[:, :1])], dim=1)
-                episode_attnmask = rl.compute_episode_attnmask(dones)
+                episode_attnmask = None
+                if _needs_attnmask(value_model):
+                    dones = self.storage.query_key("dones").to(device).squeeze(-1).transpose(0, 1)
+                    dones = torch.cat([dones, torch.zeros_like(dones[:, :1])], dim=1)
+                    episode_attnmask = rl.compute_episode_attnmask(dones)
                 all_obs_dict = {}
                 for key in obs_dict.keys():  # noqa: SIM118
                     if key not in ["actor_obs"]:  # actor_obs not required by value model
+                        if not self._storage_stores_obs_key(key):
+                            continue
                         obs_value = self.storage.query_key(key).to(device)
                         obs_value = torch.cat([obs_value, obs_dict[key].unsqueeze(0)], dim=0)
                         all_obs_dict[key] = obs_value.transpose(0, 1)
@@ -1022,6 +1268,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 self.storage.batch_update_data("returns", returns)
                 self.storage.batch_update_data("advantages", advantages)
 
+        if _phase_timing:
+            self._perf_rollout_phases = {
+                "rollout_issue_s": _phase_t1 - _phase_t0,
+                "stats_flush_s": _phase_t2 - _phase_t1,
+                "post_rollout_s": time.perf_counter() - _phase_t2,
+                "flush_present": bool(self.deferred_rollout_episode_stats and rollout_done_reward_sums),
+            }
         return obs_dict
 
     def _flip_obs(self, obs, key):
@@ -1154,6 +1407,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         all_obs_dict = {
             key: self.storage.query_key(key).transpose(0, 1).to(device) for key in obs_keys
         }
+        for key in getattr(self.policy_model, "extra_rollout_keys", {}):
+            all_obs_dict[key] = self.storage.query_key(key).transpose(0, 1).to(device)
         actions = self.storage.actions.transpose(0, 1).to(device)
         logprobs = self.storage.actions_log_prob.transpose(0, 1).squeeze(-1).to(device)
         values = self.storage.values.transpose(0, 1).to(device)  # noqa: PD011
@@ -1244,7 +1499,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         mb_padding_mask = rollout_data["padding_mask"][micro_batch_inds]
         mb_padding_mask_p1 = rollout_data["padding_mask_p1"][micro_batch_inds]
 
-        episode_attnmask = rl.compute_episode_attnmask(mb_dones)
+        episode_attnmask = (
+            rl.compute_episode_attnmask(mb_dones)
+            if (_needs_attnmask(self.policy_model) or _needs_attnmask(self.value_model)) else None
+        )
 
         mb_rollout_data = {
             "micro_batch_inds": micro_batch_inds,
@@ -1384,16 +1642,21 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         mu_batch = policy_results["action_mean"]
         entropy_batch = policy_results["entropy"]
         with torch.no_grad():
-            kl = torch.sum(
+            kl_terms = (
                 torch.log(sigma_batch / mb_old_sigma + 1.0e-5)
                 + (torch.square(mb_old_sigma) + torch.square(mb_old_mu - mu_batch))
                 / (2.0 * torch.square(sigma_batch))
-                - 0.5,
-                axis=-1,
+                - 0.5
             )
+            kl = torch.sum(kl_terms, axis=-1)
             local_kl_mean = torch.mean(kl)
             kl_mean = self.accelerator.gather(local_kl_mean).mean()
-            self._adjust_learning_rate_based_on_kl(kl_mean, optimizer)
+            if not self.host_probe_batching:
+                self._adjust_learning_rate_based_on_kl(kl_mean, optimizer)
+            # host_probe_batching: the adaptive-LR update is applied after the loss
+            # is assembled, sharing ONE device->host transfer with the loss NaN/Inf
+            # guard (below). Nothing between here and that point reads
+            # args.learning_rate or the optimizer, so the decisions are identical.
 
         # Forward a DDP model twice will cause the error: "one of the variables needed for gradient computation has been modified by an inplace operation"  # noqa: E501
         vpred = value_results
@@ -1411,7 +1674,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         vf_clipfrac = masked_mean((vf_losses2 > vf_losses1).float(), ~padding_mask_p1.unsqueeze(-1))
         logprobs_diff = new_logprobs - mb_logprobs
         ratio = torch.exp(logprobs_diff).unsqueeze(-1)
-        if self.multi_critic_advantage_weights is not None:
+        if self.dual_critic_enabled:
+            mb_advantage = self._compose_dual_critic_advantage(mb_obs_dict, mb_advantage)
+        elif self.multi_critic_advantage_weights is not None:
             mb_advantage = (
                 mb_advantage
                 * torch.tensor(self.multi_critic_advantage_weights).to(mb_advantage)[None, None, :]
@@ -1459,7 +1724,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         else:
             loss = pg_loss + args.vf_coef * vf_loss + self.entropy_coef * entropy_loss
 
-        if torch.isnan(loss) or torch.isinf(loss):
+        if self.host_probe_batching:
+            host_probe = torch.stack([kl_mean.float(), loss.detach().float()]).cpu()
+            self._adjust_learning_rate_based_on_kl(host_probe[0], optimizer)
+            invalid_loss = bool(torch.isnan(host_probe[1])) or bool(torch.isinf(host_probe[1]))
+        else:
+            invalid_loss = bool(torch.isnan(loss)) or bool(torch.isinf(loss))
+        if invalid_loss:
             print(f"Invalid loss detected: {loss}")  # noqa: T201
             print(
                 f"Ratio stats: min={ratio.min()}, max={ratio.max()}, mean={ratio.mean()}"
@@ -1591,59 +1862,25 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         """
         metrics = {}
 
-        approxkl_avg = self.accelerator.gather_for_metrics(self.approxkl_stats).mean().item()
-
-        metrics["policy/approxkl_avg"] = approxkl_avg
-        metrics["policy/clipfrac_avg"] = (
-            self.accelerator.gather_for_metrics(self.pg_clipfrac_stats).mean().item()
-        )
-        metrics["loss/policy_avg"] = (
-            self.accelerator.gather_for_metrics(self.pg_loss_stats).mean().item()
-        )
+        # one packed gather + one host transfer for every per-update statistic (previously 11-17 gathers, each ending in
+        # .item()); per-rank means over equal counts equal the gathered mean; ratio variance from gathered sums
+        stats = {"policy/approxkl_avg": self.approxkl_stats, "policy/clipfrac_avg": self.pg_clipfrac_stats,
+                 "loss/policy_avg": self.pg_loss_stats}
         if self.compute_imgaug_bc_loss:
-            metrics["loss/imgaug_bc_avg"] = (
-                self.accelerator.gather_for_metrics(self.imgaug_bc_loss_stats).mean().item()
-            )
-            metrics["loss/weighted_imgaug_bc_avg"] = (
-                self.accelerator.gather_for_metrics(self.weighted_imgaug_bc_loss_stats)
-                .mean()
-                .item()
-            )
+            stats["loss/imgaug_bc_avg"] = self.imgaug_bc_loss_stats
+            stats["loss/weighted_imgaug_bc_avg"] = self.weighted_imgaug_bc_loss_stats
         if self.use_symmetry:
-            metrics["loss/actor_sym"] = (
-                self.accelerator.gather_for_metrics(self.actor_sym_loss_stats).mean().item()
-            )
-            metrics["loss/critic_sym"] = (
-                self.accelerator.gather_for_metrics(self.critic_sym_loss_stats).mean().item()
-            )
-            metrics["loss/estimation"] = (
-                self.accelerator.gather_for_metrics(self.estimation_loss_stats).mean().item()
-            )
-            metrics["loss/swap"] = (
-                self.accelerator.gather_for_metrics(self.swap_loss_stats).mean().item()
-            )
-        metrics["loss/value_avg"] = (
-            self.accelerator.gather_for_metrics(self.vf_loss_stats).mean().item()
-        )
-        metrics["loss/entropy_avg"] = (
-            self.accelerator.gather_for_metrics(self.entropy_stats).mean().item()
-        )
-        metrics["loss/weighted_ppo_loss_avg"] = (
-            self.accelerator.gather_for_metrics(self.weighted_ppo_loss_stats).mean().item()
-        )
-        metrics["val/clipfrac_avg"] = (
-            self.accelerator.gather_for_metrics(self.vf_clipfrac_stats).mean().item()
-        )
-        metrics["val/ratio"] = self.accelerator.gather_for_metrics(self.ratio_stats).mean().item()
-        metrics["val/ratio_var"] = (
-            self.accelerator.gather_for_metrics(self.ratio_stats).var().item()
-        )
-        metrics["val/advantage_mean"] = (
-            self.accelerator.gather_for_metrics(self.advantage_mean_stats).mean().item()
-        )
-        metrics["val/advantage_std"] = (
-            self.accelerator.gather_for_metrics(self.advantage_std_stats).mean().item()
-        )
+            stats["loss/actor_sym"] = self.actor_sym_loss_stats
+            stats["loss/critic_sym"] = self.critic_sym_loss_stats
+            stats["loss/estimation"] = self.estimation_loss_stats
+            stats["loss/swap"] = self.swap_loss_stats
+        stats.update({"loss/value_avg": self.vf_loss_stats, "loss/entropy_avg": self.entropy_stats,
+                      "loss/weighted_ppo_loss_avg": self.weighted_ppo_loss_stats, "val/clipfrac_avg": self.vf_clipfrac_stats,
+                      "val/ratio": self.ratio_stats, "val/advantage_mean": self.advantage_mean_stats,
+                      "val/advantage_std": self.advantage_std_stats})
+        packed = packed_means(stats, self.accelerator.gather_for_metrics, var_of=("val/ratio",))
+        metrics.update({name: packed[name] for name in stats})
+        metrics["val/ratio_var"] = packed["val/ratio__var"]
         metrics["objective/entropy"] = metrics["loss/entropy_avg"]
 
         return metrics
@@ -1661,6 +1898,12 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         """
         args = self.args
         accelerator = self.accelerator
+        if training_already_complete(self.state.global_step, args.num_total_batches):
+            accelerator.print(
+                f"{ALREADY_COMPLETE_MARKER} global_step={self.state.global_step} "
+                f"target={args.num_total_batches}; no update run"
+            )
+            return
         optimizer = self.optimizer
         model = self.model
         dataloader = self.dataloader
@@ -1707,11 +1950,27 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self.model_wrapped = self.model
 
         # env
+        _reset_started = time.perf_counter()
         obs_dict = self.env.reset_all()
         for obs_key in obs_dict.keys():  # noqa: SIM118
             obs_dict[obs_key] = obs_dict[obs_key].to(device)
+        print(  # noqa: T201
+            f"startup_phase=trainer_first_reset rank={getattr(accelerator, 'process_index', 0)} "
+            f"reset_all_s={time.perf_counter() - _reset_started:.3f} wall_end={time.time():.3f}",
+            flush=True,
+        )
 
-        for batch_idx in range(1, args.num_total_batches + 1):
+        # absolute_update_target (ContactFirst finetune): treat num_total_batches as an
+        # ABSOLUTE update counter, so a resumed run continues from its restored
+        # global_step to the same target instead of training num_total_batches more
+        # updates. Default off: the legacy loop shape (range(1, total+1)) is unchanged.
+        loop_start = 1
+        if self.config.get("absolute_update_target", False):
+            restored = int(self.state.global_step)
+            if restored < 0 or restored > args.num_total_batches:
+                raise ValueError("Absolute PPO counter/target differs")
+            loop_start = restored + 1
+        for batch_idx in range(loop_start, args.num_total_batches + 1):
             batch_start_time = time.time()
             self.state.episode += 1 * args.batch_size
             data = next(iter_dataloader)  # noqa: F841
@@ -1730,6 +1989,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     for obs_key in obs_dict.keys():  # noqa: SIM118
                         obs_dict[obs_key] = obs_dict[obs_key].to(device)
 
+            cuda_memory_debug.start()
             with torch.no_grad():
                 with models_utils.unwrap_model_for_generation(
                     self.model,
@@ -1741,8 +2001,15 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 end_collection_time = time.time()
                 collection_time = end_collection_time - batch_start_time
 
+            log_cuda_memory = os.environ.get("LOG_CUDA_MEMORY", "") in ("1", "2") and torch.cuda.is_available()
+            if log_cuda_memory:
+                rollout_peak_gib = torch.cuda.max_memory_allocated() / 2**30
+                torch.cuda.reset_peak_memory_stats()
             with common.Timer("get_rollout_data"):
-                rollout_data = self._get_rollout_data(obs_keys=obs_dict.keys())
+                rollout_obs_keys = [
+                    key for key in obs_dict.keys() if self._storage_stores_obs_key(key)  # noqa: SIM118
+                ]
+                rollout_data = self._get_rollout_data(obs_keys=rollout_obs_keys)
 
                 model = self.model
                 self._train_mode()
@@ -1825,12 +2092,6 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                                     del loss_dict, forward_results, mb_rollout_data
                                     microbatch_idx += 1
                         minibatch_idx += 1  # noqa: SIM113
-                        # del everything and empty cache
-                        # fmt: off
-                    # if self.empty_cache_every_n_ppo_epoch > 0 and (ppo_epoch_idx + 1) % self.empty_cache_every_n_ppo_epoch == 0:  # noqa: E501
-                    #     # print(f"Empty cache at ppo_epoch_idx {ppo_epoch_idx}")
-                    #     gc.collect()
-                    #     torch.cuda.empty_cache()
             ######################################################### Sync Running Mean Std #########################################################  # noqa: E501
             with common.Timer("sync_running_mean_std"):
                 self.sync_running_mean_std()
@@ -1870,12 +2131,49 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     .mean()
                     .item()
                 )
+                local_length_sum, local_length_count = episode_window_sum_and_count(
+                    self.state.lenbuffer
+                )
+                length_window_stats = self.accelerator.gather_for_metrics(
+                    torch.tensor(
+                        [local_length_sum, local_length_count],
+                        device=device,
+                        dtype=torch.float64,
+                    ).unsqueeze(0)
+                ).sum(dim=0)
+                completed_episodes_window = length_window_stats[1]
                 metrics["objective/length"] = (
-                    self.accelerator.gather_for_metrics(
-                        torch.tensor(np.mean(self.state.lenbuffer)).to(device)
-                    )
-                    .mean()
-                    .item()
+                    (length_window_stats[0] / completed_episodes_window).item()
+                    if completed_episodes_window.item() > 0
+                    else 0.0
+                )
+                metrics["objective/completed_episodes_window"] = (
+                    completed_episodes_window.item()
+                )
+                rollout_episode_stats = self.accelerator.gather_for_metrics(
+                    self._last_rollout_episode_stats.unsqueeze(0)
+                ).sum(dim=0)
+                all_count = rollout_episode_stats[1]
+                timeout_count = rollout_episode_stats[3]
+                failure_count = rollout_episode_stats[5]
+                metrics["objective/completed_episodes_rollout"] = all_count.item()
+                metrics["objective/length_all_completed"] = (
+                    (rollout_episode_stats[0] / all_count).item()
+                    if all_count.item() > 0
+                    else 0.0
+                )
+                metrics["objective/length_timeout_completed"] = (
+                    (rollout_episode_stats[2] / timeout_count).item()
+                    if timeout_count.item() > 0
+                    else 0.0
+                )
+                metrics["objective/length_failure_completed"] = (
+                    (rollout_episode_stats[4] / failure_count).item()
+                    if failure_count.item() > 0
+                    else 0.0
+                )
+                metrics["objective/timeout_completion_fraction"] = (
+                    (timeout_count / all_count).item() if all_count.item() > 0 else 0.0
                 )
                 metrics["lr"] = self.args.learning_rate
                 metrics["episode"] = self.state.episode
@@ -1912,23 +2210,81 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 for param_name, param_value in self.scheduled_params_dict.items():
                     log_dict[f"scheduled_params/{param_name}"] = param_value
 
-                if hasattr(self.policy_model, "std"):
+                if getattr(self.policy_model, "_has_action_std_groups", False):
+                    metrics["Policy/mean_noise_std"] = self.policy_model.get_std.mean().item()
+                elif hasattr(self.policy_model, "std"):
                     metrics["Policy/mean_noise_std"] = self.policy_model.std.mean().item()
                 else:
                     metrics["Policy/mean_noise_std"] = 0.0
+                if hasattr(self.policy_model, "action_std_group_means"):
+                    for group_name, group_std in self.policy_model.action_std_group_means().items():
+                        metrics[f"Policy/noise_std_{group_name}"] = group_std
                 self.append_to_log_dict(log_dict)
                 metrics.update({f"Env/{k}": v for k, v in env_log_dict.items()})
                 metrics.update(env_log_dict)
                 metrics.update(log_dict)
 
+                log_started = time.perf_counter()
                 self.log(metrics)
+                log_seconds = time.perf_counter() - log_started
                 self.ep_infos.clear()
+                if log_cuda_memory:
+                    # Opt-in diagnostic: separate PyTorch growth from simulator memory.
+                    free_bytes, total_bytes = torch.cuda.mem_get_info()
+                    used_gib = (total_bytes - free_bytes) / 2**30
+                    reserved_gib = torch.cuda.memory_reserved() / 2**30
+                    print(  # noqa: T201
+                        f"[cuda-mem] it={self.state.global_step} "
+                        f"rollout_peak_alloc={rollout_peak_gib:.2f} "
+                        f"ppo_peak_alloc={torch.cuda.max_memory_allocated() / 2**30:.2f} "
+                        f"alloc={torch.cuda.memory_allocated() / 2**30:.2f} "
+                        f"reserved={reserved_gib:.2f} device_used={used_gib:.2f} "
+                        f"non_torch={used_gib - reserved_gib:.2f} GiB",
+                        flush=True,
+                    )
+                    torch.cuda.reset_peak_memory_stats()
 
             self.lr_scheduler.step()
 
             del metrics, rollout_data
+            # CUDA tensors caught in Python reference cycles are only released by
+            # the cyclic collector, which runs rarely on IsaacSim's large heap and
+            # let ~3.7 GiB accumulate per step at 8192 envs. Collect explicitly.
+            gc_every = int(self.config.get("gc_collect_every_n_iterations", 0) or 0)
+            gc_seconds = 0.0
+            if gc_every > 0 and self.state.global_step % gc_every == 0:
+                gc_started = time.perf_counter()
+                if not getattr(self, "_gc_startup_heap_frozen", False):
+                    # Once per process, at the first explicit collection of this leg: collect the startup garbage,
+                    # then move the long-lived startup heap (simulator, motion library, model/optimizer state, caches:
+                    # millions of objects that never die) to the collector's permanent generation. Every later
+                    # explicit collection traverses only the objects created since, so the per-update cycles that
+                    # hold CUDA tensors are still released while the ~0.5-1.1 s full-heap traversal per update
+                    # (PERF gc_s) is not repeated. Nothing else changes: same cadence, same collector.
+                    gc.collect()
+                    gc.freeze()
+                    self._gc_startup_heap_frozen = True
+                else:
+                    with common.Timer("gc_collect"):
+                        gc.collect()
+                gc_seconds = time.perf_counter() - gc_started
+            cuda_memory_debug.on_iteration(self.state.global_step, self.args.output_dir)
 
+            callbacks_started = time.perf_counter()
             self.control = self.callback_handler.on_step_end(args, self.state, self.control)
+            callbacks_seconds = time.perf_counter() - callbacks_started
+            if self.perf_timing_log:
+                # Opt-in wall-clock accounting outside the logged Collection/Learning
+                # timers: logging, explicit gc, and callbacks (checkpoint saves).
+                print(  # noqa: T201
+                    f"[PERF] it={self.state.global_step} rank={self._perf_rank} "
+                    f"wall_end={time.time():.3f} "
+                    f"collection_s={collection_time:.4f} learn_s={learn_time:.4f} "
+                    f"log_s={log_seconds:.4f} gc_s={gc_seconds:.4f} "
+                    f"callbacks_s={callbacks_seconds:.4f}"
+                    + (self._perf_rollout_phase_fields() if self.perf_rollout_phase_timing else ""),
+                    flush=True,
+                )
 
             if self.control.should_training_stop:
                 break
@@ -1980,9 +2336,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             and (self.state.global_step + 1) % sync_adaptive_sampling_all_gpus_freq == 0
         )
         if hasattr(self.env, "sync_and_compute_adaptive_sampling"):
-            self.env.sync_and_compute_adaptive_sampling(
-                self.accelerator, sync_across_gpus=sync_across_gpus
-            )
+            if sync_across_gpus:
+                # one cross-GPU sync per completed step, shared with the save / boundary callbacks (adaptive_sync_gate)
+                from gear_sonic.trl.callbacks.adaptive_sync_gate import sync_once_per_step
+
+                sync_once_per_step(self.env, self.accelerator, self.state.global_step + 1, source="trainer")
+            else:
+                self.env.sync_and_compute_adaptive_sampling(self.accelerator, sync_across_gpus=False)
 
     def append_to_log_dict(self, log_dict):
         """Hook for subclasses to inject additional entries into the per-iteration log dict."""
@@ -2055,16 +2415,6 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         args = self.args
         model = self.model
 
-        # Check for NaN/Inf in gradients
-        for name, param in model.named_parameters():
-            if param.grad is not None and (
-                torch.isnan(param.grad).any() or torch.isinf(param.grad).any()
-            ):
-                print(  # noqa: T201
-                    f"[Rank {self.accelerator.process_index}] NaN/Inf grad in {name}, norm={param.grad.norm():.3e}"
-                )
-                self.optimizer.zero_grad()
-                return None
         grad_norm = None
         if args.max_grad_norm is not None and args.max_grad_norm > 0:
             # deepspeed does its own clipping
@@ -2094,6 +2444,12 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             else:
                 grad_norm = _grad_norm
 
+        # the only remaining gradient check: the clipping result (one host sync) decides the non-finite update skip;
+        # without clipping one fused isfinite over the gradients (the former per-parameter isnan/isinf walk and its
+        # diagnostic prints were up to one host sync per parameter)
+        if nonfinite_update_skip(grad_norm, [p.grad for p in model.parameters() if p.grad is not None] if grad_norm is None else []):
+            self.optimizer.zero_grad()
+            return None
         return grad_norm
 
     def _compute_returns(self, values, last_values, policy_state_dict):
@@ -2139,15 +2495,23 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         # Compute and normalize the advantages
         advantages = returns - values
         if self.sync_advantage_normalization:
-            # gather advantages from all processes before normalization
-            advantages = self.accelerator.gather(advantages)
-            advantages = (advantages - advantages.mean(dim=(0, 1), keepdim=True)) / (
-                advantages.std(dim=(0, 1), keepdim=True) + 1e-8
-            )
-            # ungather advantages
-            advantages = advantages.reshape(
-                self.accelerator.num_processes, -1, *advantages.shape[1:]
-            )[self.accelerator.process_index].to(device)
+            if self.config.get("advantage_normalization_reduced_moments", False):
+                # Opt-in (ContactFirst manipulation runs): global mean / unbiased std over every
+                # rank's advantages from reduced float64 moments (sum, sum of squares, count)
+                # instead of an all-gather of the whole tensor; same formula and eps.
+                advantages = normalize_advantages_distributed(
+                    advantages, lambda t: self.accelerator.reduce(t, reduction="sum"), eps=1e-8
+                )
+            else:
+                # Default: gather advantages from all processes before normalization
+                advantages = self.accelerator.gather(advantages)
+                advantages = (advantages - advantages.mean(dim=(0, 1), keepdim=True)) / (
+                    advantages.std(dim=(0, 1), keepdim=True) + 1e-8
+                )
+                # ungather advantages
+                advantages = advantages.reshape(
+                    self.accelerator.num_processes, -1, *advantages.shape[1:]
+                )[self.accelerator.process_index].to(device)
         else:
             advantages = (advantages - advantages.mean(dim=(0, 1), keepdim=True)) / (
                 advantages.std(dim=(0, 1), keepdim=True) + 1e-8
@@ -2194,22 +2558,59 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 counters (global_step, max_steps, etc.) so training starts fresh
                 in a new experiment_dir without tripping HF's
                 ``DefaultFlowCallback.on_step_end`` early-stop.
-            flexible_load: Reserved for future use; ignored in this build.
+            flexible_load: Permit missing/unexpected actor keys even when the
+                experiment otherwise requires an exact checkpoint contract.
 
         Returns:
             The loaded checkpoint dict.
         """
         print(f"Loading checkpoint from {checkpoint_path}")  # noqa: T201
+        _restore_started = time.perf_counter()
         checkpoint = torch.load(
             checkpoint_path, map_location=self.accelerator.device, weights_only=False
         )
-
+        _load_done = time.perf_counter()   # file read + unpickle (incl. the env state's Python object graph)
+        _env_state_s = 0.0
         # Load model state
         model = self.accelerator.unwrap_model(self.model)
         if "actor_model_state_dict" in checkpoint:
             model.policy.load_state_dict(checkpoint["actor_model_state_dict"])
         elif "policy_state_dict" in checkpoint:
-            model.policy.load_state_dict(checkpoint["policy_state_dict"], strict=False)
+            require_exact = bool(
+                self.config.get("require_exact_checkpoint_actor_keys", False)
+            )
+            incompatible = model.policy.load_state_dict(
+                checkpoint["policy_state_dict"],
+                strict=require_exact and not flexible_load,
+            )
+            if not require_exact or flexible_load:
+                missing = list(incompatible.missing_keys)
+                unexpected = list(incompatible.unexpected_keys)
+                if missing or unexpected:
+                    print(  # noqa: T201
+                        "Flexible actor checkpoint load: "
+                        f"missing={missing}, unexpected={unexpected}"
+                    )
+
+        # A short weights-only adaptation may explicitly discard the learned
+        # exploration scale from the source checkpoint.  Keep this opt-in and
+        # after state-dict loading so the checkpoint cannot overwrite it.
+        from gear_sonic.trl.utils.checkpoint_action_noise import (
+            maybe_reset_action_noise_after_checkpoint_load,
+        )
+
+        noise_reset = maybe_reset_action_noise_after_checkpoint_load(
+            model.policy,
+            self.config,
+            resume=resume,
+            warm_resume=warm_resume,
+        )
+        if noise_reset is not None:
+            print(  # noqa: T201
+                "Reset checkpoint action noise: "
+                f"{noise_reset['parameterization']} -> {noise_reset['init_noise_std']}; "
+                f"frozen={noise_reset['frozen']}"
+            )
         if "value_state_dict" in checkpoint and model.value_model is not None:
             model.value_model.load_state_dict(checkpoint["value_state_dict"])
 
@@ -2235,8 +2636,20 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             ):
                 self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
 
+            if resume and self.config.get("resume_restore_param_group_lrs", False):
+                # ContactFirst exact resume: the vendored full-resume path reloads the
+                # optimizer but training_args.learning_rate then flattens per-group
+                # learning rates; restore each saved group's lr explicitly.
+                saved_groups = checkpoint["optimizer_state_dict"]["param_groups"]
+                if len(saved_groups) != len(self.optimizer.param_groups):
+                    raise ValueError("Optimizer group count differs on resume")
+                for saved, actual in zip(saved_groups, self.optimizer.param_groups):
+                    actual["lr"] = saved["lr"]
+
             if "env_state_dict" in checkpoint:
-                self.env.load_env_state_dict(checkpoint["env_state_dict"])
+                _env_started = time.perf_counter()
+                self.env.load_env_state_dict(checkpoint["env_state_dict"], reset_after_restore=False)  # train() runs reset_all right after
+                _env_state_s = time.perf_counter() - _env_started
 
             if "state" in checkpoint:
                 for key, value in checkpoint["state"].__dict__.items():
@@ -2253,7 +2666,23 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     ]:
                         setattr(self.state, key, value)
 
-        print(f"Loaded checkpoint from step {checkpoint['state'].global_step}")  # noqa: T201
+        if resume and self.config.get("resume_verify_exact", False):
+            from gear_sonic.trl.trainer.resume_verification import verify_exact_resume
+
+            verify_exact_resume(self, checkpoint, self.args.output_dir)
+
+        # restore_s = load_s (torch.load: file + unpickle) + env_state_s (motion-library / sampler state restore)
+        # + other_s (model, optimizer, scheduler, counters). Measured on a representative multi-rank restart: restore_s
+        # 127-129 s on every rank with 144 MB last.pt of which 125 MB is the sampler's per-bin Python object graph (706,802 bins); the
+        # split names the owner of the time instead of calling it IO.
+        _restore_s = time.perf_counter() - _restore_started
+        _load_s = _load_done - _restore_started
+        print(  # noqa: T201
+            f"Loaded checkpoint from step {checkpoint['state'].global_step} "
+            f"(startup_phase=trainer_restore rank={getattr(self.accelerator, 'process_index', 0)} "
+            f"restore_s={_restore_s:.3f} load_s={_load_s:.3f} env_state_s={_env_state_s:.3f} "
+            f"other_s={max(0.0, _restore_s - _load_s - _env_state_s):.3f})"
+        )
         return checkpoint
 
     def eval(self):

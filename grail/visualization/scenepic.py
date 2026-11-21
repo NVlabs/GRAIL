@@ -2,6 +2,7 @@ import numpy as np
 import scenepic as sp
 import torch
 
+from grail.core.video import DEFAULT_MOTION_FPS
 from grail.visualization.utils.rotations import quat_between_two_vec, quat_to_exp_map
 from grail.visualization.utils.vis_utils import make_checker_board_texture
 
@@ -199,11 +200,11 @@ class ScenepicVisualizer:
             aspect_ratio=1.0,
         )
 
-    def vis_scene(self, seq=None, html_path=None, window_size=(400, 400), fps=30):
+    def vis_scene(self, seq=None, html_path=None, window_size=(400, 400), fps=DEFAULT_MOTION_FPS):
         scene = self.generate_scene(seq, window_size=window_size, fps=fps)
         scene.save_as_html(html_path)
 
-    def vis_scenes(self, seqs=None, html_path=None, window_size=(400, 400), fps=30):
+    def vis_scenes(self, seqs=None, html_path=None, window_size=(400, 400), fps=DEFAULT_MOTION_FPS):
         # Create a ScenePic instance
         sp_scene = sp.Scene()
         for idx, seq in enumerate(seqs):
@@ -218,7 +219,7 @@ class ScenepicVisualizer:
         seq=None,
         window_size=None,
         return_canvas=False,
-        fps=30,
+        fps=DEFAULT_MOTION_FPS,
         scene=None,
     ):
         if scene is None:

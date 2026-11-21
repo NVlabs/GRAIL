@@ -202,8 +202,19 @@ def load_bones_csv(csv_path: str) -> dict:
     # Convert xyzw → wxyz for body_quat_w format
     root_quat_wxyz = root_quat_xyzw[:, [3, 0, 1, 2]]
 
-    # Joint DOFs: degrees → radians, already in MuJoCo/MJCF actuator order
+    # Joint DOFs: degrees → radians, already in MuJoCo/MJCF actuator order.
+    # Some Bones/RP2 retarget exports omit the historical "_dof" suffix.
     joint_cols = [c for c in data.columns if c.endswith("_dof")]
+    if not joint_cols:
+        joint_cols = [
+            name.removesuffix("_dof")
+            for name in BONES_CSV_JOINT_NAMES
+            if name.removesuffix("_dof") in data.columns
+        ]
+    if len(joint_cols) != NUM_DOF:
+        raise ValueError(
+            f"Expected {NUM_DOF} joint columns, found {len(joint_cols)} in {csv_path}"
+        )
     joint_pos_mj = np.deg2rad(data[joint_cols].values).astype(np.float32)  # (T, 29)
 
     # Create dummy body_pos_w and body_quat_w (only root body populated, rest zeros)

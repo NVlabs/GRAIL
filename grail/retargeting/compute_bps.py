@@ -12,7 +12,7 @@ BPS encoding (Prokudin et al., 2019):
   - BPS vector = d scalar distances (shape (d,))
 
 Requires gearenv python (pxr for USD reading):
-  /root/anaconda3/envs/gearenv/bin/python -u groot/rl/scripts/motion/compute_bps.py \\
+  python -m grail.retargeting.compute_bps \\
       --object_usd_dir data/motion_lib_genhoi/<dataset>/object_usd \\
       --output_dir data/motion_lib_genhoi/<dataset>/bps \\
       --num_basis 10
@@ -21,10 +21,11 @@ Requires gearenv python (pxr for USD reading):
 import argparse
 import os
 import sys
+
 import numpy as np  # type: ignore[import]
 
-
 # ── BPS basis points ──────────────────────────────────────────────────────────
+
 
 def fibonacci_sphere(n: int) -> np.ndarray:
     """Generate n evenly-spaced points on a unit sphere via Fibonacci lattice."""
@@ -39,6 +40,7 @@ def fibonacci_sphere(n: int) -> np.ndarray:
 
 
 # ── Mesh extraction from USD ───────────────────────────────────────────────────
+
 
 def extract_mesh_from_usd(usd_path: str):
     """Extract all vertices and triangle faces from a USD file.
@@ -99,7 +101,10 @@ def extract_mesh_from_usd(usd_path: str):
 
 # ── Surface point sampling ────────────────────────────────────────────────────
 
-def sample_surface_points(vertices: np.ndarray, faces: np.ndarray, n_samples: int = 2048) -> np.ndarray:
+
+def sample_surface_points(
+    vertices: np.ndarray, faces: np.ndarray, n_samples: int = 2048
+) -> np.ndarray:
     """Uniformly sample points on the mesh surface (area-weighted).
 
     Returns:
@@ -132,6 +137,7 @@ def sample_surface_points(vertices: np.ndarray, faces: np.ndarray, n_samples: in
 
 # ── BPS computation ───────────────────────────────────────────────────────────
 
+
 def compute_bps(pts: np.ndarray, basis: np.ndarray) -> np.ndarray:
     """Compute BPS encoding for a point cloud.
 
@@ -144,7 +150,7 @@ def compute_bps(pts: np.ndarray, basis: np.ndarray) -> np.ndarray:
     """
     # (d, N) pairwise distances
     diffs = basis[:, None, :] - pts[None, :, :]  # (d, N, 3)
-    dists = np.linalg.norm(diffs, axis=-1)       # (d, N)
+    dists = np.linalg.norm(diffs, axis=-1)  # (d, N)
     return dists.min(axis=1).astype(np.float32)  # (d,)
 
 
@@ -159,6 +165,7 @@ def normalize_points(pts: np.ndarray):
 
 
 # ── Per-USD processing ────────────────────────────────────────────────────────
+
 
 def process_usd(usd_path: str, basis: np.ndarray, n_surface: int = 2048):
     """Extract, sample, normalize, and encode a single USD file.
@@ -191,12 +198,22 @@ def process_usd(usd_path: str, basis: np.ndarray, n_surface: int = 2048):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(description="Compute BPS encoding for object USD meshes")
     parser.add_argument("--object_usd_dir", required=True, help="Directory containing .usd files")
-    parser.add_argument("--output_dir", required=True, help="Output directory (one .npy per object + _basis.npy)")
-    parser.add_argument("--num_basis", type=int, default=10, help="Number of basis points (default: 10)")
-    parser.add_argument("--n_surface", type=int, default=2048, help="Surface sample count per object (default: 2048)")
+    parser.add_argument(
+        "--output_dir", required=True, help="Output directory (one .npy per object + _basis.npy)"
+    )
+    parser.add_argument(
+        "--num_basis", type=int, default=10, help="Number of basis points (default: 10)"
+    )
+    parser.add_argument(
+        "--n_surface",
+        type=int,
+        default=2048,
+        help="Surface sample count per object (default: 2048)",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
 
@@ -238,11 +255,15 @@ def main():
             np.save(os.path.join(args.output_dir, f"{stem}.npy"), bps)
             n_saved += 1
             if (i + 1) % 50 == 0 or (i + 1) == len(usd_files):
-                print(f"  [{i+1}/{len(usd_files)}] Done. bps range [{bps.min():.3f}, {bps.max():.3f}]")
+                print(
+                    f"  [{i+1}/{len(usd_files)}] Done. bps range [{bps.min():.3f}, {bps.max():.3f}]"
+                )
 
     print(f"\n[BPS] Saved {n_saved} objects → {args.output_dir}/")
     if failed:
-        print(f"[BPS] {len(failed)} failed: {[s for s, _ in failed[:5]]}{'...' if len(failed) > 5 else ''}")
+        print(
+            f"[BPS] {len(failed)} failed: {[s for s, _ in failed[:5]]}{'...' if len(failed) > 5 else ''}"
+        )
 
 
 if __name__ == "__main__":

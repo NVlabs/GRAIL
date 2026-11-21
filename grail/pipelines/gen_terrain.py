@@ -25,8 +25,7 @@ from PIL import Image
 # Tunables (match original generate_*.py scripts)
 # ---------------------------------------------------------------------------
 
-# Sizes are pre-scaled for the G1 retargeted character (g1_smplx, ~70% of human SMPL-X
-# height). Previously the gen produced human-sized terrain and downstream object yamls
+# Sizes are pre-scaled for the G1 character.
 # applied `obj_scale: [0.6, 0.6, 0.6]` at render time; that scale is now baked in here
 # so the rendered terrain matches G1 directly with `obj_scale: [1.0, 1.0, 1.0]`.
 
@@ -167,22 +166,34 @@ def generate_slope_pieces(seed):
     return pieces
 
 
-def generate_stair_pieces(seed, uniform=False):
+def generate_stair_pieces(
+    seed,
+    uniform=False,
+    step_count_range=None,
+    rise_range=None,
+    tread_range=None,
+    width_range=None,
+):
     """Generate stair geometry. Returns list of (verts, faces, color, is_quad)."""
     random.seed(seed)
-    num_steps = random.randint(*STAIR_STEP_COUNT_RANGE)
-    width_y = _rng(*STAIR_WIDTH_RANGE)
+    step_count_range = step_count_range or STAIR_STEP_COUNT_RANGE
+    rise_range = rise_range or STAIR_RISE_RANGE
+    tread_range = tread_range or STAIR_TREAD_RANGE
+    width_range = width_range or STAIR_WIDTH_RANGE
+
+    num_steps = random.randint(*step_count_range)
+    width_y = _rng(*width_range)
 
     if uniform:
-        rise = _rng(*STAIR_RISE_RANGE)
-        tread = _rng(*STAIR_TREAD_RANGE)
+        rise = _rng(*rise_range)
+        tread = _rng(*tread_range)
         rises = [rise] * num_steps
         treads_up = [tread] * num_steps
         treads_down = [tread] * num_steps
     else:
-        rises = [_rng(*STAIR_RISE_RANGE) for _ in range(num_steps)]
-        treads_up = [_rng(*STAIR_TREAD_RANGE) for _ in range(num_steps)]
-        treads_down = [_rng(*STAIR_TREAD_RANGE) for _ in range(num_steps)]
+        rises = [_rng(*rise_range) for _ in range(num_steps)]
+        treads_up = [_rng(*tread_range) for _ in range(num_steps)]
+        treads_down = [_rng(*tread_range) for _ in range(num_steps)]
 
     total_length = sum(treads_up) + sum(treads_down)
     pieces = []
@@ -403,7 +414,27 @@ def main():
         action="store_true",
         help="Stairs only: use fixed rise and tread for every step in each staircase",
     )
+    parser.add_argument("--stair-min-steps", type=int, default=STAIR_STEP_COUNT_RANGE[0])
+    parser.add_argument("--stair-max-steps", type=int, default=STAIR_STEP_COUNT_RANGE[1])
+    parser.add_argument("--stair-rise-min", type=float, default=STAIR_RISE_RANGE[0])
+    parser.add_argument("--stair-rise-max", type=float, default=STAIR_RISE_RANGE[1])
+    parser.add_argument("--stair-tread-min", type=float, default=STAIR_TREAD_RANGE[0])
+    parser.add_argument("--stair-tread-max", type=float, default=STAIR_TREAD_RANGE[1])
+    parser.add_argument("--stair-width-min", type=float, default=STAIR_WIDTH_RANGE[0])
+    parser.add_argument("--stair-width-max", type=float, default=STAIR_WIDTH_RANGE[1])
     args = parser.parse_args()
+
+    if args.stair_min_steps <= 0 or args.stair_min_steps > args.stair_max_steps:
+        parser.error("--stair-min-steps must be positive and <= --stair-max-steps")
+    for min_name, max_name in [
+        ("stair_rise_min", "stair_rise_max"),
+        ("stair_tread_min", "stair_tread_max"),
+        ("stair_width_min", "stair_width_max"),
+    ]:
+        min_value = getattr(args, min_name)
+        max_value = getattr(args, max_name)
+        if min_value <= 0 or min_value > max_value:
+            parser.error(f"--{min_name.replace('_', '-')} must be positive and <= --{max_name.replace('_', '-')}")
 
     types = list(GENERATORS.keys()) if args.type == "all" else [args.type]
 
@@ -421,6 +452,10 @@ def main():
             kwargs = {}
             if terrain_type == "stairs":
                 kwargs["uniform"] = args.uniform
+                kwargs["step_count_range"] = (args.stair_min_steps, args.stair_max_steps)
+                kwargs["rise_range"] = (args.stair_rise_min, args.stair_rise_max)
+                kwargs["tread_range"] = (args.stair_tread_min, args.stair_tread_max)
+                kwargs["width_range"] = (args.stair_width_min, args.stair_width_max)
             pieces = gen_func(seed, **kwargs)
             export_terrain(pieces, out_dir, name)
             total += 1

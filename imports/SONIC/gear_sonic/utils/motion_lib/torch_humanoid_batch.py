@@ -448,6 +448,18 @@ class Humanoid_Batch:
 
             dof_vel = (return_dict.dof_pos[:, 1:] - return_dict.dof_pos[:, :-1]) / dt
             return_dict.dof_vels = torch.cat([dof_vel, dof_vel[:, -2:-1]], dim=1)
+            dof_velocity_filter_sigma = float(
+                self.cfg.get("dof_velocity_filter_sigma", 0.0)
+            )
+            if dof_velocity_filter_sigma > 0.0:
+                return_dict.dof_vels = torch.from_numpy(
+                    filters.gaussian_filter1d(
+                        return_dict.dof_vels.numpy(),
+                        dof_velocity_filter_sigma,
+                        axis=1,
+                        mode="nearest",
+                    )
+                ).to(return_dict.dof_vels)
             return_dict.fps = int(1 / dt)
 
         return return_dict

@@ -1,10 +1,7 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# 4D HOI Reconstruction — MANIPULATION/PICKUP (native SOMA03 body model)
-#
-# Same as manip_smplx.yaml — only body_model and the SMPL-X-specific paths
-# differ. All optimization weights, filters, and post-processing settings are
-# kept in sync with the SMPL-X variant by design.
-# ═══════════════════════════════════════════════════════════════════════════════
+# GEM-X native77 final775 with native SOMA-X 0.3.3 and fixed G1 identity.
+# Estimation preserves source FPS/frame count and raw predicted shape. The fixed
+# identity is applied only when constructing the reconstruction human model.
+# Historical checkpoints retain their archived model/configuration bindings.
 
 # ── Directory paths ───────────────────────────────────────────────────────────
 paths:
@@ -29,6 +26,7 @@ human_model:
   gem_x_python: "imports/GEM-X/.venv/bin/python"
   gem_x_device: cuda
   gem_x_postprocess: false
+  # Bind source SAM2 masks before native77 observations and Body Pose features.
   gem_x_human_crop_repair: true
   gem_x_human_crop_config:
     max_crop_scale: 3.0
@@ -51,12 +49,16 @@ obj_pose_tracking:
 
 # ── Optimization config (passed to HOIOptimizer) ─────────────────────────────
 optimization:
+  foot_support_mode: plane  # Fixed by the manipulation config family.
   log_dir: "logs"
   exp_name: "static_cam"
   use_global: False
 
-  cache_list:
-    - contact_labels
+  cache_list: []
+  # Export original surface IDs/binding during Stage 1 for video interval authoring.
+  export_contact_review_inputs: true
+  # Review the actual optimized sequence; do not apply a blind post-fit filter.
+  output_smoothing: false
 
   vis_cfg:
     vis_init: true
@@ -76,7 +78,7 @@ optimization:
         human_trans_res:
           lr: 0.003
         human_pose_res:
-          lr: 0.0001
+          lr: 0.001
         obj_t_res:
           lr: 0.003
         obj_R_res:
@@ -85,6 +87,7 @@ optimization:
       loss_cfg:
         keypoint_tracking:
           weight: 0.3
+          confidence_threshold: 0.9  # Strict >; native77 raw heatmap scores (not probabilities)
           beta: 0.1
         human_smoothness:
           weight: 30.0
@@ -92,9 +95,48 @@ optimization:
         human_pose_reg:
           weight: 100.0
         human_foot_contact:
-          weight: 10.0
+          label_source: gem
+          weight: 30.0
+          point_mode: foot_parts  # Native whole-foot/toe regions, gated independently
+          velocity_space: planar
+          gravity_axis: z
+          weight_mode: hard
+          threshold: 0.5  # GEM support confidence; separate from 2D validity
+          long_horizon_lag: 4
+          long_horizon_weight: 1.0
+          stance_weight: 2.0  # Suppress cumulative drift within each support interval
+          stance_min_frames: 3
+          stance_robust_delta_m: 0.005
+        # Supply the measured plane and its provenance explicitly; no default floor.
+        human_foot_ground:
+          weight: 300.0
+          penetration_weight: 2.0
+          support_weight: 1.0
+          support_threshold: 0.5
+          robust_delta_m: 0.005
+          support_height_m: 0.002  # Small explicit clearance, below the 1 cm review limit.
+          penetration_margin_m: 0.002  # Apply the soft barrier at the same sole target.
+          plane: null  # Required: {normal: [0, 0, 1], offset_m: ..., source: ...}.
+        human_foot_ground_temporal:
+          weight: 1.0
+          component_weights:
+            window_velocity: 0.1
+            window_acceleration: 0.1
+          options:
+            fps: source
+            threshold: 0.5
+            window_frames: 4
+            velocity_scale_mps: 0.35
+            acceleration_scale_mps2: 3.0
+            correction_speed_tolerance_mps: 0.15
+            acceleration_tolerance_mps2: 3.0
         human_global_init_reg:
           weight: 3000.0
+          mode: root_relative_velocity
+          relative_frame: root  # Full inverse root rotation before frame differences
+          root_joint_index: 0  # Native SOMA Hips; all other 76 joints included
+          root_speed_weight: 1.0
+          joint_velocity_weight: 1.0
         verts_tracking:
           weight: 0.3
         obj_smoothness:
@@ -123,6 +165,7 @@ optimization:
       loss_cfg:
         keypoint_tracking:
           weight: 0.3
+          confidence_threshold: 0.9  # Strict >; native77 raw heatmap scores (not probabilities)
           beta: 0.1
         human_smoothness:
           weight: 30.0
@@ -130,38 +173,96 @@ optimization:
         human_pose_reg:
           weight: 100.0
         human_foot_contact:
+          label_source: gem
           weight: 10.0
+          point_mode: foot_parts
+          velocity_space: planar
+          gravity_axis: z
+          weight_mode: hard
+          threshold: 0.5
+          long_horizon_lag: 4
+          long_horizon_weight: 1.0
+          stance_weight: 2.0
+          stance_min_frames: 3
+          stance_robust_delta_m: 0.005
+        # Supply the measured plane and its provenance explicitly; no default floor.
+        human_foot_ground:
+          weight: 300.0
+          penetration_weight: 2.0
+          support_weight: 1.0
+          support_threshold: 0.5
+          robust_delta_m: 0.005
+          support_height_m: 0.002  # Small explicit clearance, below the 1 cm review limit.
+          penetration_margin_m: 0.002  # Apply the soft barrier at the same sole target.
+          plane: null  # Required: {normal: [0, 0, 1], offset_m: ..., source: ...}.
+        human_foot_ground_temporal:
+          weight: 1.0
+          component_weights:
+            window_velocity: 0.1
+            window_acceleration: 0.1
+          options:
+            fps: source
+            threshold: 0.5
+            window_frames: 4
+            velocity_scale_mps: 0.35
+            acceleration_scale_mps2: 3.0
+            correction_speed_tolerance_mps: 0.15
+            acceleration_tolerance_mps2: 3.0
         human_global_init_reg:
           weight: 3000.0
+          mode: root_relative_velocity
+          relative_frame: root  # Full inverse root rotation before frame differences
+          root_joint_index: 0  # Native SOMA Hips; all other 76 joints included
+          root_speed_weight: 1.0
+          joint_velocity_weight: 1.0
         obj_precontact_reg:
           weight: 100.0
         verts_tracking:
           weight: 0.3
         obj_smoothness:
           weight: 50.0
-        depth_pointcloud:
-          weight: 100.0
-          duration: "all"
-          interval: 1
-          num_gt_samples: 3000
-          trim_pct: 0.2
-          depth_tol: 0.02
-        contact:
+        # Stage 2 uses depth for review only; Stage 1 retains its depth loss.
+        contact: &stage2_regional_contact
           weight: 30000.0
-          duration: "all"
-          depth_only: true
-          max_contact_dist: 0.15
+          mode: phase_contact_map
+          # Author native hand/object regions from this video's contact intervals.
+          prediction_path: "{cache_dir}/contact_maps/{sequence}.json"
+          partial_mass_fraction: 0.25
+          pair_temperature_m2: 0.000016
+          coverage_temperature_m2: 0.000016
+          robust_delta_m: 0.01
+          gap_tolerance_m: 0.001
+          normal_distance_scale_m: 0.005
+          min_opposing_cosine: 0.5
+          activation_ramp_frames: 1  # Full attraction at the reviewed first touch.
+          phase_blend_frames: 4
+        phase_contact_temporal:
+          weight: 1.0
+          # Inherits the same group's contact; no separately drifting map settings.
+          # This source-reviewed sidecar supplies FPS, stable holds and windows.
+          # No case-specific frame/region IDs are inferred from object motion.
+          scope_path: "{cache_dir}/contact_maps/{sequence}.temporal.json"
+          component_weights:
+            hold_relative_velocity: 0.1
+            window_velocity: 0.4
+            window_acceleration: 0.4
+          options:
+            hold_ramp_frames: 4
+            hold_speed_tolerance_mps: 0.02
+            hold_speed_scale_mps: 0.05
+            window_speed_tolerance_mps: 0.35
+            window_speed_scale_mps: 0.35
+            window_acceleration_tolerance_mps2: 3.0
+            window_acceleration_scale_mps2: 3.0
 
   eval:
     keypoint_tracking:
       weight: 0.1
+      confidence_threshold: 0.9
       beta: 0.1
       threshold: 2.0
-    contact:
-      weight: 100000.0
-      duration: "all"
-      threshold: 5.0
-      max_contact_dist: 0.15
+    # Regional loss is diagnostic; a fixed-pair threshold does not transfer.
+    contact: *stage2_regional_contact
 
 # ── Filtering config ────────────────────────────────────────
 filtering:

@@ -138,8 +138,8 @@ def parse_bvh(filepath):
     return joints, channel_order, motion_data, n_frames, frame_time
 
 
-def compute_fk_selected(joints, channel_order, motion_data, selected_names):
-    """Compute FK world positions for selected joints only.
+def compute_fk_selected_with_rotations(joints, channel_order, motion_data, selected_names):
+    """Compute FK world positions and rotations for selected joints.
 
     Uses vectorized rotation computation per joint across all frames.
 
@@ -151,6 +151,7 @@ def compute_fk_selected(joints, channel_order, motion_data, selected_names):
 
     Returns:
         selected_positions: (n_frames, len(selected_names), 3) in BVH units (cm)
+        selected_rotations: (n_frames, len(selected_names), 3, 3) in the BVH world frame
         root_quats: (n_frames, 4) root orientation quaternions (xyzw)
     """
     n_frames = motion_data.shape[0]
@@ -237,13 +238,22 @@ def compute_fk_selected(joints, channel_order, motion_data, selected_names):
     # Extract selected joints
     sel_indices = [joint_names.index(name) for name in selected_names if name in joint_names]
     selected_positions = world_pos[:, sel_indices, :]  # (n_frames, len(selected_names), 3)
+    selected_rotations = world_rots[:, sel_indices, :, :]
 
     # Extract root quaternion (Hips joint, index 1)
     hips_idx = joint_names.index("Hips") if "Hips" in joint_names else 0
     root_quats_scipy = transform.Rotation.from_matrix(world_rots[:, hips_idx])
     root_quats = root_quats_scipy.as_quat()  # (n_frames, 4) as xyzw
 
-    return selected_positions, root_quats
+    return selected_positions, selected_rotations, root_quats
+
+
+def compute_fk_selected(joints, channel_order, motion_data, selected_names):
+    """Compute FK world positions while preserving the original public API."""
+    positions, _rotations, root_quats = compute_fk_selected_with_rotations(
+        joints, channel_order, motion_data, selected_names
+    )
+    return positions, root_quats
 
 
 def process_single_bvh(args):

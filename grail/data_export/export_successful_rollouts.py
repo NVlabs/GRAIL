@@ -254,13 +254,12 @@ def _get_dof_axis():
         "data",
         "body_profiles",
         "unitree_g1",
-        "smplx",
         "g1_skeleton_meta.pkl",
     )
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
             f"g1_skeleton_meta.pkl not found at {meta_path}. It is required to build "
-            "pose_aa (dof_axis). Restore data/body_profiles/unitree_g1/smplx/ "
+            "pose_aa (dof_axis). Restore data/body_profiles/unitree_g1/ "
             "in the checkout on the exporting machine."
         )
     meta = joblib.load(meta_path)

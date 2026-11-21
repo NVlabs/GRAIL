@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # GRAIL full environment setup from scratch.
-# Creates conda envs (grail + hunyuan, optionally sonic), installs all deps,
+# Creates conda envs (grail and hunyuan), installs all deps,
 # builds CUDA extensions.
 #
 # Usage:
 #   bash scripts/setup/install_env_scratch.sh [OPTIONS]
 #   Options: --skip-system-deps, --skip-pytorch, --skip-cuda-extensions,
-#            --skip-foundationpose, --skip-gem-smpl, --skip-gem-x,
+#            --skip-foundationpose, --skip-gem-x,
 #            --skip-moge, --skip-mose3, --skip-hunyuan, --only-hunyuan,
-#            --install-sonic (opt-in; also creates the 'sonic' env with
-#                             Isaac Sim 5.1 + Isaac Lab v2.3.2 — ~30 GB disk,
-#                             ~30 min, needs sudo for git-lfs at the end),
 #            --help
 set -eo pipefail
 
@@ -25,9 +22,8 @@ section() { echo -e "\n${CYAN}══ $1 ══${NC}"; }
 
 # ── Parse arguments ────────────────────────────────────────────────────────
 SKIP_SYSTEM_DEPS=false; SKIP_PYTORCH=false; SKIP_CUDA_EXTENSIONS=false
-SKIP_FOUNDATIONPOSE=false; SKIP_GEM_SMPL=false; SKIP_GEM_X=false
+SKIP_FOUNDATIONPOSE=false; SKIP_GEM_X=false
 SKIP_MOGE=false; SKIP_MOSE3=false; SKIP_HUNYUAN=false; ONLY_HUNYUAN=false
-INSTALL_SONIC=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -35,14 +31,11 @@ for arg in "$@"; do
         --skip-pytorch)          SKIP_PYTORCH=true ;;
         --skip-cuda-extensions)  SKIP_CUDA_EXTENSIONS=true ;;
         --skip-foundationpose)   SKIP_FOUNDATIONPOSE=true ;;
-        --skip-gem-smpl)         SKIP_GEM_SMPL=true ;;
-        --skip-gem-x)            SKIP_GEM_X=true ;;
-        --skip-gem-soma)         SKIP_GEM_X=true ;; # backwards-compatible alias
+        --skip-gem-x)         SKIP_GEM_X=true ;;
         --skip-moge)             SKIP_MOGE=true ;;
         --skip-mose3)            SKIP_MOSE3=true ;;
         --skip-hunyuan)          SKIP_HUNYUAN=true ;;
         --only-hunyuan)          ONLY_HUNYUAN=true ;;
-        --install-sonic)         INSTALL_SONIC=true ;;
         --help|-h) grep '^#' "$0" | head -14 | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -50,7 +43,7 @@ done
 
 if [ "$ONLY_HUNYUAN" = true ]; then
     SKIP_SYSTEM_DEPS=true; SKIP_PYTORCH=true
-    SKIP_FOUNDATIONPOSE=true; SKIP_GEM_SMPL=true; SKIP_GEM_X=true
+    SKIP_FOUNDATIONPOSE=true; SKIP_GEM_X=true
     SKIP_MOGE=true; SKIP_MOSE3=true; SKIP_HUNYUAN=false
 fi
 
@@ -168,7 +161,7 @@ $PIP install \
 
 $PIP install \
     'transformers==4.46.0' accelerate safetensors huggingface_hub sentencepiece \
-    smplx roma timm kornia wandb tensorboardX lightning \
+    roma timm kornia wandb tensorboardX lightning \
     hydra-core hydra-zen hydra_colorlog rich \
     2>&1 | tail -3
 
@@ -177,11 +170,6 @@ $PIP install \
     ultralytics lmdb colorama gdown openai rerun-sdk configer natsort ipdb \
     wis3d 'sam2==0.4.0' seaborn transformations ruamel.yaml fast-simplification \
     2>&1 | tail -3
-
-# chumpy (SMPL-X body model loading — patch for numpy compat)
-$PIP install chumpy --no-build-isolation 2>&1 | tail -3
-CHUMPY_INIT=$($PYTHON -c "import importlib.util; spec = importlib.util.find_spec('chumpy'); print(spec.origin if spec else '')" 2>/dev/null || echo "")
-[ -n "$CHUMPY_INIT" ] && sed -i 's/from numpy import bool, int, float, complex, object, unicode, str, nan, inf/from numpy import nan, inf/' "$CHUMPY_INIT"
 
 $PIP install 'warp-lang==1.8.0' 2>&1 | tail -3
 ok "Python dependencies"
@@ -276,25 +264,7 @@ if [ "$SKIP_FOUNDATIONPOSE" = false ]; then
     fi
 fi
 
-# ── GEM-SMPL ──────────────────────────────────────────────────────────────
-if [ "$SKIP_GEM_SMPL" = false ]; then
-    section "GEM-SMPL"
-    GEM_SMPL_DIR="$PROJECT_ROOT/imports/GEM-SMPL"
-    if [ ! -f "$GEM_SMPL_DIR/setup.py" ]; then
-        warn "Submodule not found. Run: git submodule update --init imports/GEM-SMPL"
-    else
-        $PIP install -e "$GEM_SMPL_DIR" --no-deps 2>&1 | tail -3
-        $PIP install cython_bbox lapx wis3d \
-            "git+https://github.com/google/aistplusplus_api.git" \
-            "git+https://github.com/warmshao/WiLoR-mini.git" --no-deps \
-            torch-scatter -f "https://data.pyg.org/whl/torch-$($PYTHON -c 'import torch; print(torch.__version__.split("+")[0])')+${TORCH_CUDA_TAG}.html" \
-            2>&1 | tail -3
-
-        ok "GEM-SMPL"
-    fi
-fi
-
-# ── GEM-X ──────────────────────────────────────────────────────────────────
+# ── GEM-X ─────────────────────────────────────────────────────────────────
 if [ "$SKIP_GEM_X" = false ]; then
     section "GEM-X isolated prediction runtime and native SOMA-X"
     GEM_X_ASSETS="${GRAIL_GEM_X_ASSETS:-${XDG_CACHE_HOME:-$HOME/.cache}/grail/models/gem-x}"
@@ -325,10 +295,6 @@ if [ "$SKIP_MOSE3" = false ]; then
     bash "$PROJECT_ROOT/scripts/setup/install_mose3.sh" --python "$PYTHON"
     ok "MoSE3 (weights downloaded separately; GRAIL PyTorch unchanged)"
 fi
-
-section "SOMA Retargeter (Unitree G1 + DEx3)"
-bash "$PROJECT_ROOT/scripts/setup/install_soma_retargeter.sh" --python "$PYTHON"
-ok "SOMA Retargeter"
 
 fi  # end ONLY_HUNYUAN guard
 
@@ -409,22 +375,4 @@ if [ "$ONLY_HUNYUAN" = false ]; then
 fi
 
 # ── Sonic (Isaac Sim + Isaac Lab + retargeting + task-general tracking) ───
-# Opt-in because it's a separate heavy env (~30 GB disk, ~30 min wall-clock)
-# and needs sudo for git-lfs. The actual work is delegated to the standalone
-# install_env_sonic.sh, which also works on its own against a pre-existing env.
-if [ "$INSTALL_SONIC" = true ] && [ "$ONLY_HUNYUAN" = false ]; then
-    section "Sonic env (Isaac Sim 5.1 + Isaac Lab v2.3.2)"
-    bash "$PROJECT_ROOT/scripts/setup/install_env_sonic.sh"
-fi
-
-echo ""
-echo -e "${GREEN}Installation complete.${NC}"
-if [ "$INSTALL_SONIC" = true ] && [ "$ONLY_HUNYUAN" = false ]; then
-    echo ""
-    echo "One manual step still needed for sonic:"
-    echo "  sudo apt install -y git-lfs && git lfs install"
-    echo "  cd imports/SONIC && git lfs pull"
-    echo "Then verify with:"
-    echo "  conda activate sonic"
-    echo "  OMNI_KIT_ACCEPT_EULA=Yes python imports/SONIC/check_environment.py --training"
-fi
+echo "Installation complete."

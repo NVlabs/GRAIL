@@ -50,6 +50,8 @@ class HOIData:
     is_static_obj: bool
     obj_sdf: Any = None
     static_objects: dict | None = None
+    # Bound original contact geometry is independent of remeshed tracking verts.
+    fixed_contact_context: dict | None = None
 
 
 @dataclass

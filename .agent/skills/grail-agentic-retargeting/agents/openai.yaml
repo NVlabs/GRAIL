@@ -1,0 +1,4 @@
+interface:
+  display_name: "GRAIL Agentic Retargeting"
+  short_description: "Author robot grasps and refine contact-aware motion"
+  default_prompt: "Use $grail-agentic-retargeting to author and review native robot grasps, then refine the requested robot motion while preserving source pose."

@@ -1,102 +1,176 @@
 # 4D HOI Reconstruction
 
-Reconstructs metric human and object motion from generated videos. The public
-default is native SOMA 0.3 human motion predicted by GEM-X, MoGe-3 depth, and
-MoSE3 + FoundationPose hybrid object tracking. The output keeps the existing
-GRAIL contact-label optimization and post-processing path.
+Recovers native SOMA03 body/hand motion and a 6-DoF object trajectory from a
+generated or captured RGB video. New prediction and reconstruction default to
+GEM-X native77 with SOMA-X 0.3.3.
 
 ## Quickstart
 
 ```bash
-# Dynamic object: manipulation / pickup (default)
-python -m grail.pipelines.recon_4dhoi \
-    --dataset ComAsset --category cordless_drill --results_dir results
+# Manipulation/pickup — native SOMA03 (default, expects object to move)
+python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
+    --results_dir results
 
-# Static object: terrain / sitting
-python -m grail.pipelines.recon_4dhoi \
-    --config configs/recon_4dhoi/loco_soma.yaml \
-    --dataset syn_stairs --results_dir results
+# Explicitly select the same SOMA03 default
+python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
+    --results_dir results --config configs/recon_4dhoi/manip_soma.yaml
+
+# Terrain / sitting (static object — bypasses FoundationPose)
+python -m grail.pipelines.recon_4dhoi --dataset syn_stairs --results_dir results \
+    --config configs/recon_4dhoi/loco_soma.yaml
 ```
 
-The default config is `configs/recon_4dhoi/manip_soma.yaml`. Validated output
-is written below `results/generation/4dhoi_recon_soma03_valid/`.
+Install the {blob}`public GEM-X and SOMA-X runtime <docs/gem_x.md>` before fresh
+inference. Raw prediction retains its estimated shape; reconstruction uses the
+configured fixed identity. Stage 2 needs newly reviewed contact maps and
+temporal scopes for each source video; examples are not reusable annotations.
+For a new clip, use `--skip_step4 --skip_step5 --skip_step6` to prepare the
+observations first, then use the [staged fitting guide](agentic_kinematic.md)
+to review contact intervals and fit native placement.
 
-## Pipeline stages
+Default outputs that pass the numerical filter land under
+`results/generation/4dhoi_recon_soma03_valid/{dataset}/{category}/{video_id}/`.
+Review visual alignment and contact quality using the exported results:
 
-1. **Human pose** — GEM-X predicts native SOMA pose, translation, identity,
-   scale, hands, and camera parameters while preserving source FPS and frame
-   count. GRAIL applies the fixed public G1 human identity downstream.
-2. **Masks and depth** — SAM2 tracks human/object masks; the isolated MoGe-3
-   worker predicts depth without changing the main GRAIL PyTorch/Triton stack.
-3. **Object pose** — dynamic-object configs generate metric-CAD proposals from
-   MoSE3 and select/refine them in a closed FoundationPose loop. Static terrain
-   configs use the known rendered object pose.
-4. **HOI optimization** — the original `contact_labels` cache, contact loss,
-   and OpenAI vision contact-joint detection remain unchanged. Set
-   `OPENAI_API_KEY`; the default vision model is `gpt-4o`.
-5. **Filtering** — removes invalid camera, mask, duration, and task-motion cases.
-6. **Post-processing and visualization** — writes canonical human/object motion,
-   contact points, videos, and the ScenePic viewer.
+- `hoi_data/hoi_data.pkl` — body params + object 6-DoF poses per frame
+- `result_vis/recon_result.mp4` — overlaid reconstruction on the input
+- `result_vis/recon_comparison.mp4` — side-by-side input vs. recon
+- `result_vis/recon_result_top_view.mp4` — top-down view
+- `result_vis/recon_result.html` — interactive ScenePic viewer using the same
+  post-processed export coordinates as `hoi_data/hoi_data.pkl` (object-centered
+  by default), with 24 FPS for the default generated-video pipeline
+- `mesh_data/` — the canonical object mesh used in optimization
 
-This release does not include autonomous contact authoring or review workflows.
+## Inspect existing native results
+
+Use the saved result videos/ScenePic export for the conventional pipeline, or the
+{blob}`native Blender replay importer <docs/hoi_blender_replay.md>` for a selected
+SOMA03 checkpoint in its original scene. Keep the
+checkpoint's actual model tag, model assets, fixed identity and coordinate
+convention; renaming it or selecting another display mesh is not a conversion.
+The [staged fitting guide](agentic_kinematic.md) documents selected-parent lineage
+and final evidence review.
+
+Only load trusted `hoi_data.pkl` / native pickle files. Python pickle is not a
+safe interchange format for untrusted input. Model assets and the configured
+runtime are required to reconstruct the original surface geometry; numeric
+parameter arrays alone do not establish that geometry.
+
+## Pipeline steps
+
+```{list-table}
+:widths: 5 25 70
+:header-rows: 1
+
+* - #
+  - Stage
+  - Notes
+* - 1
+  - Human pose
+  - Public GEM-X native77 body and hand prediction with native SOMA03; preserve source frame count/FPS and raw predicted identity.
+* - 2
+  - Preprocess
+  - SAM2 mask tracking + MoGe-3 ViT-G monocular depth, with calibrated camera FOV and optional background-GT alignment.
+* - 3
+  - Object pose
+  - MoSE3 metric-CAD proposals + FoundationPose hybrid selection, then trajectory smoothing; preserve raw and processed poses separately.
+* - 4
+  - HOI optimization
+  - Stage 1 placement fit, followed by Stage 2 video-authored regional-contact fitting.
+    Before Stage 2, inspect the source video and author independent per-hand
+    contact maps and temporal scopes bound to this video's native geometry.
+    Explicit fixed material pairs remain an alternative for reviewed correspondences.
+    Automatic VLM contact labels and geometric-nearest contact fallback are removed.
+    See {blob}`the contact review format <docs/fixed_contact_points.md>` and the [separate agentic placement/review workflow](agentic_kinematic.md).
+* - 5
+  - Filter
+  - Quality thresholds: human-position error, mask alignment, keypoint
+    tracking, contact penalty, penetration, motion magnitude.
+* - 6
+  - Visualize
+  - PyTorch3D top-down + side-by-side renders and ScenePic HTML are generated by the optimization visualization config. The separate pipeline Step 6 HTML aggregation function is not enabled in the default step dispatch.
+```
+
+MoGe-3 uses an [isolated inference runtime](installation.md) so its Triton
+dependencies do not replace the main reconstruction environment. Run
+`bash scripts/setup/install_moge3.sh` from the GRAIL environment after updating
+the pinned submodule. New depth caches use `<recon_cache_dir>/depth_moge3_vitg/`
+and require a model-provenance JSON sidecar. Existing MoGe-2 files under `depth/`
+are retained and are not reused by preprocessing or the optimizer. Existing
+completed reconstructions remain unchanged until optimization is rerun; use a
+separate output directory when comparing results across depth models.
+
+## Required environment
+
+Step 4 no longer calls an automatic VLM contact detector or requires its API key.
+Stage 2 requires a video-reviewed contact-interval manifest prepared before fitting;
+see {blob}`the contact review format <docs/fixed_contact_points.md>`.
+
+## Common variants
+
+```bash
+# Single video by ID
+python -m grail.pipelines.recon_4dhoi --video_id ComAsset/cordless_drill/<video_name> \
+    --results_dir results
+
+# Skip already-finished videos
+python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
+    --results_dir results --skip_done
+
+# Step 4+ only (after source-specific contact-map authoring)
+python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
+    --results_dir results --skip_step1 --skip_step2 --skip_step3
+
+# Static-object mode (no global object motion expected)
+python -m grail.pipelines.recon_4dhoi --dataset ComAsset --category cordless_drill \
+    --results_dir results --is_static_obj
+```
 
 ## Configs
 
+Select the SOMA configuration for the task.
+
 ```{list-table}
-:widths: 32 18 50
+:widths: 35 65
 :header-rows: 1
 
-* - Config
-  - Human model
-  - Use
+* - File
+  - Purpose
 * - `configs/recon_4dhoi/manip_soma.yaml`
-  - SOMA 0.3 (default)
-  - Dynamic manipulation/pickup with hybrid object tracking.
+  - Default manipulation / pickup entry: GEM-X native SOMA03, fixed reconstruction identity, video-authored dense contact maps and temporal scopes. Stage 2 depth loss is disabled.
 * - `configs/recon_4dhoi/loco_soma.yaml`
-  - SOMA 0.3
-  - Static terrain and sitting.
-* - `configs/recon_4dhoi/manip_smplx.yaml`
-  - G1-proportioned SMPL-X
-  - Explicit legacy dynamic-object route.
-* - `configs/recon_4dhoi/loco_smplx.yaml`
-  - G1-proportioned SMPL-X
-  - Explicit legacy static-object route.
+  - Native SOMA03 locomotion / terrain / sitting. Validates static-object masks before bypassing dynamic object tracking.
 ```
 
-Both SOMA configs use
-`data/body_profiles/unitree_g1/soma/soma03_custom_smplx_identity.npz`.
-The DHGen character is a 2D rendering asset and is not substituted for the
-native SOMA body model.
+These two files are the maintained reconstruction entries. Both use
+the current GEM-X native SOMA03 backend; historical SOMA/MHR checkpoints retain
+their own archived model/config bindings and are not reinterpreted by these
+names. Never reuse contact vertex IDs across models or silently convert model
+tags. New human prediction fails explicitly if SOMA03 is unavailable; it does
+not fall back to a different estimator.
 
-## Runtime selection
+The config family fixes `optimization.foot_support_mode`. Manipulation uses
+`plane` with `human_foot_ground`, `human_foot_ground_temporal` and the retained
+planar `human_foot_contact` in its existing Stage 1/2 losses. Supply the same
+explicit measured floor plane and provenance in both `human_foot_ground.plane`
+fields. Locomotion uses `terrain` with `human_scene_support`,
+`human_scene_support_temporal` and planar `human_foot_contact` in its existing
+single `init_opt` stage. Supply the reviewed finite `grail.scene_support.v1`
+manifest through the existing support inputs. Missing required plane/manifest
+input fails numerical fitting; no default height or mode fallback is inferred.
+See {blob}`plane support <docs/foot_ground_support.md>`,
+{blob}`finite terrain support <docs/scene_support.md>` and the
+{blob}`native fitting runner <docs/static_locomotion_fitting.md>`.
+These loss additions leave the existing output and postprocessing contracts
+unchanged.
 
-Default paths are:
-
-```text
-imports/GEM-X/.venv/bin/python
-.venvs/moge3/bin/python
-.venvs/mose3/bin/python
-imports/MoSE3/ckpt
-```
-
-Override isolated workers with `GRAIL_MOGE_PYTHON`, `GRAIL_MOSE3_PYTHON`,
-`GRAIL_MOSE3_ROOT`, `GRAIL_MOSE3_CHECKPOINT`, or the corresponding YAML keys.
-See [installation](installation.md) for pinned setup commands.
-
-## Resume individual stages
+## Sharded fan-out
 
 ```bash
-# Human estimation only
-python -m grail.pipelines.recon_4dhoi --skip_step2 --skip_step3 \
-    --skip_step4 --skip_step5 --skip_step6
-
-# Reuse pose and rerun masks/depth/object tracking
-python -m grail.pipelines.recon_4dhoi --skip_step1 \
-    --skip_step4 --skip_step5 --skip_step6
-
-# Reuse prediction/tracking and rerun optimization onward
-python -m grail.pipelines.recon_4dhoi --skip_step1 --skip_step2 --skip_step3
+# Run one shard per worker in your scheduler.
+python -m grail.pipelines.recon_4dhoi \
+    --dataset ComAsset \
+    --results_dir results \
+    --job_chunk_idx <i> \
+    --num_job_chunks <N>
 ```
-
-Use a new `results_dir` when changing body representation or predictor binding;
-SOMA and SMPL-X caches are intentionally not interchangeable.

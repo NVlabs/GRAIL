@@ -18,6 +18,8 @@
 # gear_sonic/trl/ instead of the HuggingFace trl package. Replace with repo root.
 import sys
 import os
+import time
+_PROCESS_STARTED_MONOTONIC = time.monotonic()
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _repo_root = os.path.dirname(_script_dir)
 if _script_dir in sys.path:
@@ -53,16 +55,18 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from loguru import logger
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import yaml
 
 from gear_sonic.trl.utils.common import (
     custom_instantiate,
+    ensure_trl_trainer_utils_alias,
     get_filtered_state_dict,
     materialize_lazy_params,
-    wandb_run_exists,
 )
+from gear_sonic.trl.utils.wandb_identity import choose_wandb_run_id
 from gear_sonic.utils.common import seeding
 from gear_sonic.utils.config_utils import register_rl_resolvers
 from gear_sonic.utils.obs_utils import get_group_term_obs_shape
@@ -90,17 +94,23 @@ def resume_training(config):
                 f"into new experiment_dir {explicit_dir}"
             )
             return
-    elif config.get("experiment_dir", None) is not None:
-        last_existing_checkpoint = os.path.join(config.experiment_dir, "last.pt")
     else:
         # Use experiment_dir to find the checkpoint, rather than reconstructing
         # from config.project_name which can differ from the actual filesystem path.
-        experiment_dir_base = re.sub(r"-\d{8}_\d{6}$", "", config.experiment_dir)
-        checkpoints = sorted(glob.glob(os.path.join(f"{experiment_dir_base}-*", "last.pt")))
-        if not checkpoints:
-            print(f"No checkpoint found matching {experiment_dir_base}-*/last.pt, starting fresh")
+        experiment_dir = config.get("experiment_dir", None)
+        if experiment_dir is None:
+            print("No experiment_dir set for resume, starting fresh")
             return
-        last_existing_checkpoint = checkpoints[-1]
+        current_run_last = os.path.join(experiment_dir, "last.pt")
+        if os.path.isfile(current_run_last):
+            last_existing_checkpoint = current_run_last
+        else:
+            experiment_dir_base = re.sub(r"-\d{8}_\d{6}$", "", experiment_dir)
+            checkpoints = sorted(glob.glob(os.path.join(f"{experiment_dir_base}-*", "last.pt")))
+            if not checkpoints:
+                print(f"No checkpoint found matching {experiment_dir_base}-*/last.pt, starting fresh")
+                return
+            last_existing_checkpoint = checkpoints[-1]
     experiment_dir = os.path.dirname(last_existing_checkpoint)
     config.experiment_dir = experiment_dir
     config.checkpoint = last_existing_checkpoint
@@ -177,12 +187,61 @@ def create_manager_env(config, device, args_cli):
     env_instance_cfg.seed = config.seed
     env_instance_cfg.sim.device = device
     env_instance_cfg.config["headless"] = args_cli.headless
-    _train_breadcrumb(config, "create_manager_env: constructing ManagerBasedRLEnv")
-    env = ManagerBasedRLEnv(
-        cfg=env_instance_cfg, render_mode="rgb_array" if not args_cli.headless else None
-    )
-    _train_breadcrumb(config, "create_manager_env: constructed ManagerBasedRLEnv")
+    # Optional authored-USD-stage accelerator (gear_sonic/isaaclab_cache; off unless
+    # manager_env.config.authored_stage_cache.mode is set). Keyed by ordinary metadata already
+    # on env_instance_cfg; miss / any cache problem before stage mutation -> native scene.
+    # Installed FIRST (swaps the InteractiveScene class object), restored LAST.
+    restore_scene_class = lambda: None  # noqa: E731
+    try:
+        from gear_sonic.isaaclab_cache import install_authored_stage_cache
 
+        try:
+            _asc_rank = int(config.get("global_rank", os.environ.get("RANK", 0)) or 0)
+        except (TypeError, ValueError):
+            _asc_rank = 0
+        try:
+            _asc_world_size = int(
+                config.algo.config.get("world_size", os.environ.get("WORLD_SIZE", 1)) or 1
+            )
+        except (TypeError, ValueError, AttributeError):
+            _asc_world_size = 1
+        restore_scene_class = install_authored_stage_cache(
+            env_instance_cfg.config.get("authored_stage_cache"),
+            env_cfg=env_instance_cfg,
+            rank=_asc_rank,
+            world_size=_asc_world_size,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional accelerator never blocks native construction
+        print(f"[authored_stage] not installed: {exc!r}", flush=True)
+    from gear_sonic.physx_replication import install as install_physx_replication
+
+    restore_physx_replication = install_physx_replication(env_instance_cfg.config)
+    # Observation-only startup stamps (gear_sonic/scene_timing.py; SCENE_TIMING=0 disables).
+    # Any failure here prints and leaves the native construction path untouched.
+    restore_scene_timing = lambda: None  # noqa: E731
+    try:
+        from gear_sonic.scene_timing import install as install_scene_timing
+
+        restore_scene_timing = install_scene_timing()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[scene_timing] not installed: {exc!r}", flush=True)
+    _train_breadcrumb(config, "create_manager_env: constructing ManagerBasedRLEnv")
+    try:
+        env = ManagerBasedRLEnv(
+            cfg=env_instance_cfg, render_mode="rgb_array" if not args_cli.headless else None
+        )
+    finally:
+        try:
+            restore_scene_timing()
+        except Exception:  # noqa: BLE001
+            pass
+        restore_physx_replication()
+        try:
+            restore_scene_class()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _train_breadcrumb(config, "create_manager_env: constructed ManagerBasedRLEnv")
     _train_breadcrumb(config, "create_manager_env: wrapping env")
     env = ManagerEnvWrapper(env, env_instance_cfg.config)
     _train_breadcrumb(config, "create_manager_env: wrapped env")
@@ -249,20 +308,40 @@ def main(config: OmegaConf):
     seeding(config.seed)
 
     meta_path = Path(config.experiment_dir) / "meta.yaml"
+    meta = {}
     if meta_path.exists():
-        meta = yaml.safe_load(open(meta_path))
-        config.wandb.wandb_id = meta["wandb_run"]
-        print(f"resume wandb from run: {config.wandb.wandb_id}")
+        with meta_path.open(encoding="utf-8") as file:
+            loaded_meta = yaml.safe_load(file)
+        if loaded_meta is not None and not isinstance(loaded_meta, dict):
+            raise ValueError(f"Expected a mapping in {meta_path}, got {type(loaded_meta)}")
+        meta = loaded_meta or {}
+
+    full_resume = bool(
+        config.get("resume", False)
+        and config.get("checkpoint", None)
+        and not config.get("warm_resume", False)
+    )
+    # explicit config id, else this run's meta.yaml (written by the first leg); the checkpoint is read once, by the
+    # restore itself (PPOTrainer.load_checkpoint) - no separate identity preload
+    requested_wandb_run_id = choose_wandb_run_id(config.wandb.wandb_id, meta.get("wandb_run"))
+    config.wandb.wandb_id = requested_wandb_run_id
+    if requested_wandb_run_id is not None:
+        print(f"resume wandb from run: {requested_wandb_run_id}")
 
     unresolved_conf = OmegaConf.to_container(config, resolve=False)
+    initialized_wandb_run_id = None
     if config.use_wandb and accelerator.is_main_process:
-        project_name = f"{config.project_name}"
-        run_name = config.experiment_dir.replace(f"{config.base_dir}/{project_name}/", "")
+        local_project_name = f"{config.project_name}"
+        wandb_project = config.wandb.wandb_project or local_project_name
+        project_name = f"{wandb_project}"
+        run_name = config.experiment_dir.replace(
+            f"{config.base_dir}/{local_project_name}/", ""
+        )
         wandb_dir = Path(config.wandb.wandb_dir)
         wandb_dir.mkdir(exist_ok=True, parents=True)
         wandb_group = None if config.wandb.wandb_id is not None else config.wandb.wandb_group
         logger.info(f"Saving wandb logs to {wandb_dir}")
-        wandb.init(
+        wandb_run = wandb.init(
             project=project_name,
             entity=config.wandb.wandb_entity,
             name=run_name,
@@ -271,8 +350,20 @@ def main(config: OmegaConf):
             dir=wandb_dir,
             id=config.wandb.wandb_id,
             group=wandb_group,
-            resume="allow",
+            resume="must" if full_resume and requested_wandb_run_id is not None else "allow",
         )
+        if os.environ.get("WANDB_MODE", "").strip().lower() != "disabled":
+            initialized_wandb_run_id = choose_wandb_run_id(getattr(wandb_run, "id", None))
+
+    persistent_wandb_run_id = initialized_wandb_run_id or requested_wandb_run_id
+    training_args.wandb_run_id = persistent_wandb_run_id
+
+    # Optional ContactFirst runtime (config.contactfirst_runtime: node-local caches,
+    # Kit/TBB/PhysX thread limits, float32 FK inputs). A no-op for the released
+    # task-general tracking configs, which do not set the section.
+    from gear_sonic.utils.contactfirst_runtime import install_from_config as _contactfirst_install
+
+    _contactfirst_install(config, base_dir=config.get("base_dir", None))
 
     # Setup simulator similar to train_agent.py
 
@@ -316,10 +407,17 @@ def main(config: OmegaConf):
         args_cli.distributed = config.multi_gpu
         args_cli.device = device
 
-        # Base kit args (quiet logs)
-        args_cli.kit_args = (
-            "--/log/level=error --/log/fileLogLevel=error --/log/outputStreamLevel=error"
-        )
+        # Kit boot settings: quiet logs + persistent UJITSO collision cooking through the mounted /root/.cache
+        # (gear_sonic/kit_boot_args.py; PHYSX_UJITSO_COOKING=0 opts out). Printed once so the leg log shows them.
+        from gear_sonic.kit_boot_args import kit_args as _kit_boot_args
+
+        # the Kit log file lands in the experiment directory: EXPERIMENT_DIR when the stage exported it, else the
+        # trainer output dir (the same directory that holds last.pt)
+        _kit_env = dict(os.environ)
+        _kit_env.setdefault("EXPERIMENT_DIR", str(config.output_dir))
+        args_cli.kit_args = _kit_boot_args(_kit_env)
+        if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+            print(f"[kit_boot] kit_args={args_cli.kit_args}", flush=True)
 
         # AppLauncher can't handle multiple processes creating it at the same time so we need a lock
         _lock_path = "/tmp/isaaclab_app_launcher.lock"
@@ -328,6 +426,10 @@ def main(config: OmegaConf):
             app_launcher = AppLauncher(args_cli)
 
         simulation_app = app_launcher.app
+        # what Kit actually resolved (store path, cooking switches, log file) - one line per rank, in the leg log
+        from gear_sonic.kit_boot_args import resolved_settings_line as _kit_resolved_settings_line
+
+        print(f"{_kit_resolved_settings_line()} rank={_local_rank}", flush=True)
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -360,7 +462,7 @@ def main(config: OmegaConf):
         logger.info(f"Saving config file to {experiment_save_dir}")
         with open(experiment_save_dir / "config.yaml", "w") as file:
             OmegaConf.save(unresolved_conf, file)
-        meta = {"wandb_run": wandb.run.id if wandb_run_exists() else None}
+        meta = {"wandb_run": persistent_wandb_run_id}
         meta["max_train_steps"] = config.algo.config.num_learning_iterations
         yaml.safe_dump(meta, open(meta_path, "w"))
         print("saved meta:", meta)
@@ -372,13 +474,37 @@ def main(config: OmegaConf):
     _train_breadcrumb(config, "main: before create_manager_env")
     env = create_manager_env(config, device, args_cli)
     _train_breadcrumb(config, "main: after create_manager_env")
+    if config.get("replay_batch_manifest", None):
+        from gear_sonic.utils.replay_batch_v1 import run_replay_batch
+
+        receipt = run_replay_batch(
+            env,
+            Path(str(config.replay_batch_manifest)),
+            process_start_monotonic=_PROCESS_STARTED_MONOTONIC,
+        )
+        print(
+            "ONE_ISAAC_APP_REPLAY_BATCH="
+            + __import__("json").dumps(receipt, sort_keys=True),
+            flush=True,
+        )
+        os._exit(0)
     if config.get("replay", False):
         _save_video_path = config.get("replay_save_video", None)
+        _titles_json = config.get("replay_env_titles_json", None)
+        _env_titles = None
+        if _titles_json:
+            import json as _json
+
+            with open(str(_titles_json)) as _handle:
+                _env_titles = _json.load(_handle)
         env.run_replay(
             start_time_step=-1,
             loop=config.get("replay_loop_num", True),
             save_video_path=_save_video_path,
             grid_spacing=config.get("replay_grid_spacing", 2.0),
+            hold_completed=config.get("replay_hold_completed", False),
+            per_env_video_dir=config.get("replay_per_env_video_dir", None),
+            env_titles=_env_titles,
         )
         os._exit(0)
     if config.get("vplanner_replay", False):
@@ -428,6 +554,16 @@ def main(config: OmegaConf):
                 env.config["obs"]["group_obs_names"][key] = group_obs_names
                 env.config["obs"]["obs_dims"][key] = group_obs_total_dim
                 env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
+        for key, value in example_obs.items():
+            if key in env.config["robot"]["algo_obs_dim_dict"]:
+                continue
+            if key in {"policy", "critic"}:
+                continue
+            obs_shape = tuple(value.shape[1:])
+            env.config["obs"]["obs_dims"][key] = int(np.prod(obs_shape).item())
+            env.config["obs"]["group_obs_dims"][key] = {key: obs_shape}
+            env.config["obs"]["group_obs_names"][key] = [key]
+            env.config["robot"]["algo_obs_dim_dict"][key] = int(np.prod(obs_shape).item())
         if config.manager_env.config.get("meta_action_dim", None) is not None:
             env.config["robot"]["actions_dim"] = config.manager_env.config.meta_action_dim
         else:
@@ -442,7 +578,6 @@ def main(config: OmegaConf):
             backbone_kwargs=policy_backbone_kwargs,
             _resolve=False,
         ).to(device)
-        _train_breadcrumb(config, "main: after policy instantiate")
 
         if getattr(config.algo.config, "use_dagger", False):
             # Get teacher input key from config or default to "teacher"
@@ -456,7 +591,6 @@ def main(config: OmegaConf):
                 input_key=teacher_input_key,
             ).to(device)
         if not getattr(config.algo.config, "distill_only", False):
-            _train_breadcrumb(config, "main: before value model instantiate")
             value_model = custom_instantiate(
                 config.algo.config.critic,
                 env_config=env.config,
@@ -465,7 +599,6 @@ def main(config: OmegaConf):
                 backbone_kwargs=critic_backbone_kwargs,
                 _resolve=False,
             ).to(device)
-            _train_breadcrumb(config, "main: after value model instantiate")
         if config.algo.config.get("use_amp", False):
             disc_model = custom_instantiate(
                 config.algo.config.disc,
@@ -485,6 +618,8 @@ def main(config: OmegaConf):
         pretrained_cfg = config.algo.config.pretrained_model
         sd_key = pretrained_cfg.get("state_dict_key", "state_dict")
         strict = pretrained_cfg.get("strict", True)
+        # TRL < 0.28.0 checkpoints pickle references to trl.trainer.utils symbols
+        ensure_trl_trainer_utils_alias()
         state_dict = torch.load(pretrained_cfg.path, map_location=device, weights_only=False)[
             sd_key
         ]
@@ -510,7 +645,6 @@ def main(config: OmegaConf):
     ################
     # Training
     ################
-    _train_breadcrumb(config, "main: before trainer instantiate")
     trainer = custom_instantiate(
         config.trainer,
         args=training_args,
@@ -533,7 +667,6 @@ def main(config: OmegaConf):
         accelerator=accelerator,
         _resolve=False,
     )
-    _train_breadcrumb(config, "main: after trainer instantiate")
 
     # Training loop
     _train_breadcrumb(config, "main: before trainer.train")

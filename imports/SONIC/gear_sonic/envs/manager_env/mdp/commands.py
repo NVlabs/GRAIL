@@ -5,7 +5,10 @@ from __future__ import annotations
 import copy
 import dataclasses
 import glob
+import json
 import os
+import re
+import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -14,9 +17,19 @@ import isaaclab.sim as sim_utils
 import numpy as np
 import torch
 from gear_sonic.envs.env_utils import joint_utils
+from gear_sonic.envs.manager_env.mdp import utils as mdp_utils
 from gear_sonic.isaac_utils import rotations as isaac_utils_rotations
+from gear_sonic.rp2.joint_source_roster import joint_source_roster_from_view
+from gear_sonic.rp2.discrete_contact import (
+    CONTACT_BODY_GROUPS,
+    CONTACT_ENTITY_CLASSES,
+    duration_seconds_to_frames,
+)
+from gear_sonic.rp2.joint_roster import build_asset_compatible_motion_groups
 from gear_sonic.trl.utils import common, order_converter, torch_transform
+from gear_sonic.utils.generative_command import advance_motion_time_steps
 from gear_sonic.utils.motion_lib import motion_lib_robot
+from gear_sonic.utils.rp2_reset_starts import load_reset_start_cache
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -40,6 +53,131 @@ if TYPE_CHECKING:
 # Objects spread vertically (Z) since envs only vary in X,Y - much simpler!
 INACTIVE_OBJECT_BASE_OFFSET = torch.tensor([1000.0, 0.0, -50.0])  # 1km away in X, 50m underground
 INACTIVE_OBJECT_Z_SPACING = 10.0  # 10m vertical spacing between objects (must be > chair height)
+
+
+def _first_required_canonical_contact_by_motion(
+    reference_contact_state: torch.Tensor,
+    length_starts,
+    motion_keys: Sequence[str],
+) -> dict[str, int]:
+    """Return first active-entity required-contact frame for every motion."""
+    state = torch.as_tensor(reference_contact_state)
+    expected_tail = (len(CONTACT_ENTITY_CLASSES), len(CONTACT_BODY_GROUPS))
+    if state.ndim != 3 or tuple(state.shape[1:]) != expected_tail:
+        raise ValueError(
+            "Canonical reference contact tensor must have shape "
+            f"[T, {expected_tail[0]}, {expected_tail[1]}], got "
+            f"{tuple(state.shape)}"
+        )
+    starts = torch.as_tensor(length_starts, dtype=torch.long).cpu().tolist()
+    keys = [str(key) for key in motion_keys]
+    if len(starts) != len(keys):
+        raise ValueError(
+            f"Canonical contact starts/keys mismatch: {len(starts)} vs "
+            f"{len(keys)}"
+        )
+    active_axis = CONTACT_ENTITY_CLASSES.index("active_entity")
+    result = {}
+    for index, key in enumerate(keys):
+        start = int(starts[index])
+        end = (
+            int(starts[index + 1])
+            if index + 1 < len(starts)
+            else int(state.shape[0])
+        )
+        if not 0 <= start < end <= int(state.shape[0]):
+            raise ValueError(
+                f"{key}: invalid canonical contact frame span [{start}, {end})"
+            )
+        required = (state[start:end, active_axis] > 0).any(dim=-1)
+        frames = torch.where(required)[0]
+        result[key] = int(frames[0].item()) if len(frames) else end - start
+    return result
+
+
+def _mechanism_resistance_tensors(
+    slots: Sequence[dict],
+    *,
+    num_envs: int,
+    num_joints: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, torch.Tensor]:
+    """Expand per-slot mechanism resistance into simulator joint tensors."""
+    if len(slots) != int(num_envs):
+        raise ValueError(
+            "Mechanism-resistance slot count differs from environment count: "
+            f"{len(slots)} vs {num_envs}"
+        )
+    fields = (
+        "static_friction",
+        "dynamic_friction",
+        "viscous_friction",
+        "damping",
+    )
+    rows = []
+    for env_id, slot in enumerate(slots):
+        contract = slot.get("mechanism_resistance")
+        if not isinstance(contract, dict):
+            raise ValueError(
+                f"Joint-roster slot {env_id} is missing mechanism_resistance"
+            )
+        missing = [field for field in fields if field not in contract]
+        if missing:
+            raise ValueError(
+                f"Joint-roster slot {env_id} mechanism resistance is missing "
+                f"{missing}"
+            )
+        rows.append([float(contract[field]) for field in fields])
+    values = torch.tensor(rows, dtype=dtype, device=device)
+    if not torch.all(torch.isfinite(values)) or torch.any(values < 0.0):
+        raise ValueError(
+            "Joint-roster mechanism resistance must be finite and non-negative"
+        )
+    return {
+        field: values[:, field_id : field_id + 1].expand(
+            int(num_envs), int(num_joints)
+        )
+        for field_id, field in enumerate(fields)
+    }
+
+
+def _scene_object_key_from_stem(stem: str) -> str:
+    return f"object_{stem.replace('-', '_')}"
+
+
+def motion_order_object_scene_keys(
+    env,
+    max_objects: int | None = None,
+    motion_key: str | None = None,
+) -> list[str]:
+    """Return multi-object scene keys in the same order as object USD stems."""
+    rigid_objects = getattr(env.scene, "rigid_objects", {})
+    stems_by_motion = getattr(env.cfg, "object_usd_stems_by_motion", None) or {}
+    slot_count = int(getattr(env.cfg, "object_usd_slot_count", 0) or 0)
+    if slot_count > 0:
+        if motion_key is not None and motion_key in stems_by_motion:
+            num_motion_objects = len(stems_by_motion[motion_key])
+        else:
+            num_motion_objects = slot_count
+        limit = min(slot_count, num_motion_objects)
+        if max_objects is not None:
+            limit = min(limit, max_objects)
+        return [f"object_{idx}" for idx in range(limit) if f"object_{idx}" in rigid_objects]
+    if motion_key is not None and motion_key in stems_by_motion:
+        stems = stems_by_motion[motion_key]
+    else:
+        stems = getattr(env.cfg, "object_usd_stems", None) or []
+    keys = []
+    for stem in stems:
+        key = _scene_object_key_from_stem(stem)
+        if key in rigid_objects:
+            keys.append(key)
+    if not keys:
+        keys = sorted(k for k in rigid_objects if k.startswith("object_"))
+    if max_objects is not None:
+        keys = keys[:max_objects]
+    return keys
 
 
 def _init_variable_frames(
@@ -203,6 +341,79 @@ class TrackingCommand(CommandTerm):
                     "filter_motion_keys": self.cfg.filter_motion_keys,
                 }
             )
+        self.use_asset_compatible_motions = bool(
+            self.cfg.use_asset_compatible_motions
+        )
+        self.asset_compatible_roster = getattr(
+            env.cfg, "joint_roster_view", None
+        )
+        if self.use_asset_compatible_motions:
+            if self.cfg.use_paired_motions:
+                raise ValueError(
+                    "use_asset_compatible_motions and use_paired_motions are "
+                    "mutually exclusive"
+                )
+            if not isinstance(self.asset_compatible_roster, dict):
+                raise ValueError(
+                    "Asset-compatible motion sampling requires a resolved "
+                    "rank-local joint roster"
+                )
+            motion_lib_cfg["motion_file"] = self.asset_compatible_roster[
+                "motion_dir"
+            ]
+            motion_lib_cfg["object_motion_file"] = (
+                self.asset_compatible_roster["object_motion_dir"]
+            )
+            motion_lib_cfg["bps_dir"] = self.asset_compatible_roster[
+                "bps_dir"
+            ]
+            motion_lib_cfg["filter_motion_keys"] = list(
+                self.asset_compatible_roster["motion_aliases"]
+            )
+            # The no-VOF cohorts use this manifest only for immutable USD slot
+            # compatibility. They do not use the canonical-contact or
+            # checkpoint-hashed joint-source sampler.
+            # Source::motion identity tracking reads the same manifest records
+            # (source, source_motion_key, source_sample_fps_hz, world_size),
+            # which every unified cohort carries whether or not it was
+            # materialized with --track-source-stats. An explicit
+            # motion_lib_cfg.joint_source_tracking (true/false) therefore
+            # decides at runtime without re-materializing; when unset the
+            # cohort's own track_source_stats annotation applies as before.
+            tracking_override = motion_lib_cfg.get("joint_source_tracking")
+            if tracking_override is None:
+                skip_tracking = bool(
+                    self.asset_compatible_roster.get("skip_joint_source_tracking", False)
+                )
+            else:
+                skip_tracking = not bool(tracking_override)
+            # Identity source when tracking is effective: a manifest FILE (unified
+            # cohorts) is opened by the motion library as before; a direct-directory
+            # roster labels manifest_path with the pack ROOT DIRECTORY (never opened)
+            # and carries the identities in memory (identity_records,
+            # direct_roster_identity_v1) -> motion_lib_cfg.joint_source_roster. The
+            # roster's skip flag only says "no identity file"; it never discards
+            # in-memory identities when tracking was asked for.
+            roster_manifest_label = self.asset_compatible_roster["manifest_path"]
+            motion_lib_cfg["joint_source_manifest"] = None
+            motion_lib_cfg["joint_source_roster"] = None
+            if not skip_tracking:
+                if os.path.isfile(str(roster_manifest_label)):
+                    motion_lib_cfg["joint_source_manifest"] = roster_manifest_label
+                else:
+                    motion_lib_cfg["joint_source_roster"] = joint_source_roster_from_view(
+                        self.asset_compatible_roster
+                    )
+            # Unified rank-local rosters mix sources per rank. Carry the roster
+            # manifest under its own key (joint_source_manifest above stays None
+            # unless the cohort tracks source stats) so the motion library
+            # transports the assembled per-hand legacy contact placeholders on
+            # pure-source ranks exactly as mixed ranks already do.
+            motion_lib_cfg["joint_roster_manifest"] = self.asset_compatible_roster[
+                "manifest_path"
+            ]
+            motion_lib_cfg["motion_shard_world_size"] = 1
+            motion_lib_cfg["motion_shard_rank"] = 0
         # Only override filter_motion_keys if explicitly set at command level
         # (don't overwrite the value from motion_lib_cfg if it exists there)
         filter_keys = self.cfg.filter_motion_keys
@@ -249,6 +460,11 @@ class TrackingCommand(CommandTerm):
                 "randomize_wrist_poses": self.cfg.randomize_wrist_poses,
                 "randomize_wrist_prob": self.cfg.randomize_wrist_prob,
                 "randomize_wrist_std": self.cfg.randomize_wrist_std,
+                # Reset-only retarget channels use one canonical body width.
+                # Source hand encodings remain in their dedicated channels.
+                "retarget_initialization_dof_count": int(
+                    self.cfg.motion_lib_num_dof or self.robot.num_joints
+                ),
             }
         )
 
@@ -266,7 +482,7 @@ class TrackingCommand(CommandTerm):
             motion_lib_cfg, self.num_envs, self.device
         )
         if max_num_load_motions is None:
-            if self.cfg.use_paired_motions:
+            if self.cfg.use_paired_motions or self.use_asset_compatible_motions:
                 self.max_num_load_motions = self.motion_lib._num_unique_motions  # noqa: SLF001
             else:
                 self.max_num_load_motions = min(self.num_envs, 1024)
@@ -287,9 +503,38 @@ class TrackingCommand(CommandTerm):
         else:
             self.motion_lib.load_motions_for_training(max_num_seqs=self.max_num_load_motions)
         self.use_adaptive_sampling = self.motion_lib.use_adaptive_sampling
+        self._asset_compatible_motion_groups = ()
+        self._asset_compatible_env_group_ids = None
+        self._asset_compatible_representative_motion_ids = None
+        if self.use_asset_compatible_motions:
+            grouping = build_asset_compatible_motion_groups(
+                self.asset_compatible_roster,
+                self.motion_lib.curr_motion_keys,
+            )
+            self._asset_compatible_motion_groups = tuple(
+                torch.tensor(
+                    group["motion_ids"],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                for group in grouping["groups"]
+            )
+            self._asset_compatible_env_group_ids = torch.tensor(
+                grouping["env_group_ids"],
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._asset_compatible_representative_motion_ids = torch.tensor(
+                grouping["representative_motion_ids"],
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._apply_joint_roster_mechanism_resistance()
+            self._apply_joint_roster_physics_overrides()
 
         # Load contact data for contact-based initialization
         self._load_contact_data()
+        self._load_reset_start_cache()
 
         # Setup DOF mapping for handling mismatch between motion library and robot
 
@@ -315,8 +560,43 @@ class TrackingCommand(CommandTerm):
                 device=self.device,
             )
 
+            # Reference-hand-DOF reset: map reference dof[29:43] to robot joints BY NAME.
+            # The data (converter output) hand block is in HAND_ORDER_USD (breadth-first,
+            # == IsaacLab USD articulation order); the IsaacGym source URDF order was
+            # thumb-first per finger and already remapped by convert_dex31_to_motion_lib.py.
+            self.reference_hand_dof_indices = None
+            if bool(getattr(self.cfg, "reset_hand_from_reference", False)):
+                hand_order_usd = [
+                    "left_hand_index_0_joint", "left_hand_middle_0_joint", "left_hand_thumb_0_joint",
+                    "left_hand_index_1_joint", "left_hand_middle_1_joint", "left_hand_thumb_1_joint",
+                    "left_hand_thumb_2_joint",
+                    "right_hand_index_0_joint", "right_hand_middle_0_joint", "right_hand_thumb_0_joint",
+                    "right_hand_index_1_joint", "right_hand_middle_1_joint", "right_hand_thumb_1_joint",
+                    "right_hand_thumb_2_joint",
+                ]
+                robot_names = list(self.robot.joint_names)
+                missing = [n for n in hand_order_usd if n not in robot_names]
+                if missing:
+                    print(f"[HandDOF] WARNING: hand joints not on robot, disabling ref-hand init: {missing}", flush=True)
+                else:
+                    self.reference_hand_dof_indices = torch.tensor(
+                        [robot_names.index(n) for n in hand_order_usd],
+                        dtype=torch.long, device=self.device,
+                    )
+                print("[HandDOF] IsaacLab robot.joint_names (43):", robot_names, flush=True)
+                print("[HandDOF] IsaacLab robot.joint_names[-14:]:", robot_names[-14:], flush=True)
+                print("[HandDOF] data hand order (HAND_ORDER_USD):", hand_order_usd, flush=True)
+                if self.reference_hand_dof_indices is not None:
+                    print("[HandDOF] reference dof[29:43] -> robot joint indices:",
+                          self.reference_hand_dof_indices.tolist(), flush=True)
+
         # Step 1: Select which motions to use
-        if self.cfg.use_paired_motions:
+        if self.use_asset_compatible_motions:
+            self.motion_ids = self._sample_asset_compatible_motion_ids(
+                torch.arange(self.num_envs, device=self.device),
+                evaluation=False,
+            )
+        elif self.cfg.use_paired_motions:
             # Assign motion IDs sequentially (wraps around if more envs than motions)
             self.motion_ids = (
                 torch.arange(self.num_envs, device=self.device)
@@ -328,60 +608,82 @@ class TrackingCommand(CommandTerm):
             # For correct pairing we need: N_usd == N_mot AND stems identical in order.
             motion_keys = self.motion_lib.curr_motion_keys
             usd_stems = getattr(self._env.cfg, "object_usd_stems", None)
+            if usd_stems is None:
+                usd_stems = getattr(
+                    self._env.cfg, "active_articulation_usd_stems", None
+                )
             if usd_stems is not None:
                 num_usds = len(usd_stems)
                 num_motions = len(motion_keys)
-                # Check 1: counts must match
-                if num_usds != num_motions:
-                    raise ValueError(
-                        f"[FATAL] Motion-USD count mismatch: {num_usds} USDs vs {num_motions} motions. "
-                        f"Cannot guarantee per-env pairing. Fix the data or use motion-driven USD resolution."
-                    )
-                # Check 2: every stem must match in order
-                mismatches = [
-                    (i, usd_stems[i], motion_keys[i])
-                    for i in range(num_motions)
-                    if usd_stems[i] != motion_keys[i]
-                ]
-                if mismatches:
-                    detail = "\n".join(f"  idx {i}: USD={u}  MOTION={m}" for i, u, m in mismatches[:10])
-                    raise ValueError(
-                        f"[FATAL] Motion-USD stem mismatch at {len(mismatches)}/{num_motions} indices!\n{detail}"
-                    )
-                # All checks passed — log sample pairings
-                print(  # noqa: T201
-                    f"[OK] Motion-USD pairing verified: {num_motions} motions ↔ {num_usds} USDs, all stems match."
-                )
-                for k in [0, num_motions // 2, num_motions - 1]:
-                    print(f"  env {k}: {motion_keys[k]}")  # noqa: T201
-
-                # ── Terrain-mode extra checks ──
-                # n_terrain_motions is actually n_terrain_ENVS (scene cfg sets
-                # it from the env count, not motion count). With num_envs >
-                # unique terrain motions, env indices wrap — so clamp to the
-                # actual loaded motion count before checking stem alignment.
-                _n_terrain_envs = getattr(env.cfg, "config", {}).get("n_terrain_motions", 0)
-                _n_check = min(_n_terrain_envs, num_motions)
-                if _n_check > 0:
-                    terrain_stems = list(motion_keys[:_n_check])
-                    terrain_usd_stems = list(usd_stems[:_n_check])
-                    t_mismatches = [
-                        (i, terrain_usd_stems[i], terrain_stems[i])
-                        for i in range(_n_check)
-                        if terrain_usd_stems[i] != terrain_stems[i]
-                    ]
-                    if t_mismatches:
-                        detail = "\n".join(
-                            f"  idx {i}: USD={u}  MOTION={m}" for i, u, m in t_mismatches[:10]
-                        )
+                full_scene_per_env = getattr(self.cfg, "full_scene_per_env", False)
+                env_multi_object = getattr(env.cfg, "config", {}).get("multi_object_per_env", False)
+                if full_scene_per_env and env_multi_object:
+                    stems_by_motion = getattr(self._env.cfg, "object_usd_stems_by_motion", None) or {}
+                    missing_lists = [key for key in motion_keys if key not in stems_by_motion]
+                    if stems_by_motion and missing_lists:
                         raise ValueError(
-                            f"[FATAL] Terrain motion-USD mismatch at "
-                            f"{len(t_mismatches)}/{_n_check} terrain indices!\n{detail}"
+                            "[FATAL] Full-scene per-motion USD lists missing for "
+                            f"{len(missing_lists)} motion(s), first={missing_lists[:5]}"
                         )
                     print(  # noqa: T201
-                        f"[OK] Terrain-mode pairing verified: {_n_check} unique terrain motions ↔ USDs "
-                        f"(n_terrain_envs={_n_terrain_envs} with wrap)."
+                        f"[OK] Full-scene multi-object mode: {num_usds} object USDs for "
+                        f"{num_motions} motion(s); using "
+                        f"{len(stems_by_motion) or 1} per-motion object order list(s)."
                     )
+                else:
+                    # Check 1: counts must match
+                    if num_usds != num_motions:
+                        raise ValueError(
+                            f"[FATAL] Motion-USD count mismatch: {num_usds} USDs vs {num_motions} motions. "
+                            f"Cannot guarantee per-env pairing. Fix the data or use motion-driven USD resolution."
+                        )
+                    # Check 2: every stem must match in order
+                    mismatches = [
+                        (i, usd_stems[i], motion_keys[i])
+                        for i in range(num_motions)
+                        if usd_stems[i] != motion_keys[i]
+                    ]
+                    if mismatches:
+                        detail = "\n".join(
+                            f"  idx {i}: USD={u}  MOTION={m}" for i, u, m in mismatches[:10]
+                        )
+                        raise ValueError(
+                            f"[FATAL] Motion-USD stem mismatch at {len(mismatches)}/{num_motions} indices!\n{detail}"
+                        )
+                    # All checks passed — log sample pairings
+                    print(  # noqa: T201
+                        f"[OK] Motion-USD pairing verified: {num_motions} motions ↔ {num_usds} USDs, all stems match."
+                    )
+                    for k in [0, num_motions // 2, num_motions - 1]:
+                        print(f"  env {k}: {motion_keys[k]}")  # noqa: T201
+
+                    # ── Terrain-mode extra checks ──
+                    # n_terrain_motions is actually n_terrain_ENVS (scene cfg sets
+                    # it from the env count, not motion count). With num_envs >
+                    # unique terrain motions, env indices wrap — so clamp to the
+                    # actual loaded motion count before checking stem alignment.
+                    _n_terrain_envs = getattr(env.cfg, "config", {}).get("n_terrain_motions", 0)
+                    _n_check = min(_n_terrain_envs, num_motions)
+                    if _n_check > 0:
+                        terrain_stems = list(motion_keys[:_n_check])
+                        terrain_usd_stems = list(usd_stems[:_n_check])
+                        t_mismatches = [
+                            (i, terrain_usd_stems[i], terrain_stems[i])
+                            for i in range(_n_check)
+                            if terrain_usd_stems[i] != terrain_stems[i]
+                        ]
+                        if t_mismatches:
+                            detail = "\n".join(
+                                f"  idx {i}: USD={u}  MOTION={m}" for i, u, m in t_mismatches[:10]
+                            )
+                            raise ValueError(
+                                f"[FATAL] Terrain motion-USD mismatch at "
+                                f"{len(t_mismatches)}/{_n_check} terrain indices!\n{detail}"
+                            )
+                        print(  # noqa: T201
+                            f"[OK] Terrain-mode pairing verified: {_n_check} unique terrain motions ↔ USDs "
+                            f"(n_terrain_envs={_n_terrain_envs} with wrap)."
+                        )
         elif getattr(self.cfg, "sample_unique_motions", False):
             # Sample without replacement - each env gets a unique motion
             num_available = len(self.motion_lib._curr_motion_ids)  # noqa: SLF001
@@ -400,12 +702,75 @@ class TrackingCommand(CommandTerm):
             self.motion_ids = self.motion_lib.sample_motions(self.num_envs)
 
         # Step 2: Sample start time steps for selected motions
+        initial_env_ids = torch.arange(self.num_envs, device=self.device)
         self.motion_start_time_steps = self._sample_start_time_steps_for_current_motions(
-            torch.arange(self.num_envs, device=self.device)
+            initial_env_ids
         )
+        self.motion_start_time_steps = self._sample_from_reset_start_cache(
+            initial_env_ids, self.motion_start_time_steps
+        )
+        if (
+            self.cfg.sample_before_contact
+            and self._first_contact_frame is not None
+            and not self.is_evaluating
+        ):
+            self.motion_start_time_steps = self._sample_before_contact(
+                initial_env_ids, self.motion_start_time_steps
+            )
         self.motion_num_steps = self.motion_lib.get_motion_num_steps(self.motion_ids)
+        self._apply_ownership_phase_end(torch.arange(self.num_envs, device=self.device))
 
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        # Completed-episode attribution for adaptive sampling. Isaac Lab steps
+        # termination -> _reset_idx (CommandTerm.reset -> _resample_command)
+        # -> command_manager.compute (_update_command), so when the
+        # update_on_episode_end_only update runs, motion_ids /
+        # motion_start_time_steps / time_steps of a finished env already
+        # describe its NEXT episode. _resample_command therefore snapshots the
+        # finished episode into this pending buffer and _update_command
+        # consumes it (see _snapshot_completed_episodes).
+        self._adaptive_terminal_only = bool(
+            self.use_adaptive_sampling
+            and self.motion_lib.adaptive_sampling_cfg.get(
+                "update_on_episode_end_only", False
+            )
+        )
+        self._pending_episode_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._pending_episode_failed = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        # Private numeric snapshot buffers are int64 by construction: the live motion ids /
+        # start steps may be native int32 (a restored motion state replaces the live tensors
+        # with the restored dtypes, see set_motion_state), and an indexed assignment never
+        # casts, so the snapshot casts explicitly into these buffers instead.
+        self._pending_episode_motion_ids = torch.zeros(
+            self.num_envs, dtype=torch.int64, device=self.device
+        )
+        self._pending_episode_start_steps = torch.zeros(
+            self.num_envs, dtype=torch.int64, device=self.device
+        )
+        self._pending_episode_end_steps = torch.zeros(
+            self.num_envs, dtype=torch.int64, device=self.device
+        )
+
+        # Remaining hold frames for the in-contact-reset hold-and-release.
+        # Always allocated (zeros = inactive) so terminations can read it
+        # without config coupling.
+        self.object_hold_frames_left = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.object_hold_total_frames = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.object_hold_exact_frames = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.object_hold_release_frames = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
 
         # Terrain-aware sampling: split envs into flat (resample freely) and terrain (fixed motion)
         self._terrain_aware = getattr(self.cfg, "terrain_aware_sampling", False)
@@ -437,9 +802,21 @@ class TrackingCommand(CommandTerm):
                         device=self.device,
                     )
                 self.motion_start_time_steps = self.motion_lib.sample_time_steps(
-                    self.motion_ids, truncate_time=None
+                    self.motion_ids, truncate_time=self.cfg.sample_start_truncate_time_s
                 )
+                self.motion_start_time_steps = self._sample_from_reset_start_cache(
+                    env_ids_t, self.motion_start_time_steps
+                )
+                if (
+                    self.cfg.sample_before_contact
+                    and self._first_contact_frame is not None
+                    and not self.is_evaluating
+                ):
+                    self.motion_start_time_steps = self._sample_before_contact(
+                        env_ids_t, self.motion_start_time_steps
+                    )
                 self.motion_num_steps = self.motion_lib.get_motion_num_steps(self.motion_ids)
+                self._apply_ownership_phase_end(env_ids_t)
                 print(
                     f"[TerrainAwareSampling] Bound {n_terrain} terrain envs to motion_ids [0,{self._n_terrain_motions}), "
                     f"flat envs sample from [{self._n_terrain_motions},{self.motion_lib._num_motions})"
@@ -647,6 +1024,18 @@ class TrackingCommand(CommandTerm):
         # Cache for table metadata loaded from pkl files (loaded once per motion key)
         self._table_meta_cache = {}  # motion_key -> {'table_pos': tensor, 'table_quat': tensor}
 
+        self._object_roles_path = getattr(self.cfg, "object_roles_path", None)
+        self._object_roles = self._load_object_roles(self._object_roles_path)
+        self._refresh_object_metadata_cache()
+        self._object_audit_path = getattr(self.cfg, "audit_path", None)
+        self._object_audit_max_resets = int(getattr(self.cfg, "audit_max_resets", 0) or 0)
+        self._object_audit_reset_calls = 0
+        self._object_audit_records = []
+        self._object_audit_created_at = time.time()
+        if self._object_audit_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self._object_audit_path)), exist_ok=True)
+            self._write_object_audit()
+
         if self.cfg.use_height_map:
             import omni  # noqa: PLC0415
             from gear_sonic.utils.raycaster_vendored import MultiMeshRaycaster  # noqa: PLC0415
@@ -687,6 +1076,1238 @@ class TrackingCommand(CommandTerm):
             self.scan_dot_pos_w = torch.zeros(
                 self.num_envs, self.num_rays_x, self.num_rays_y, 3, device=self.device
             )
+
+    def _apply_joint_roster_mechanism_resistance(self) -> None:
+        """Apply and verify source-independent resistance for each asset slot."""
+        articulations = getattr(self._env.scene, "articulations", {})
+        if "active_articulation" not in articulations:
+            raise ValueError(
+                "Joint-roster mode requires the normalized active articulation"
+            )
+        articulation = articulations["active_articulation"]
+        if articulation.num_joints <= 0:
+            raise ValueError(
+                "Normalized active articulation must expose its mechanism joint"
+            )
+        slots = list((self.asset_compatible_roster or {}).get("slots") or [])
+        resistance = _mechanism_resistance_tensors(
+            slots,
+            num_envs=self.num_envs,
+            num_joints=articulation.num_joints,
+            device=self.device,
+            dtype=articulation.data.joint_damping.dtype,
+        )
+        env_ids = torch.arange(
+            self.num_envs,
+            dtype=torch.long,
+            device=self.device,
+        )
+        articulation.write_joint_friction_coefficient_to_sim(
+            resistance["static_friction"],
+            joint_dynamic_friction_coeff=resistance["dynamic_friction"],
+            joint_viscous_friction_coeff=resistance["viscous_friction"],
+            env_ids=env_ids,
+        )
+        articulation.write_joint_damping_to_sim(
+            resistance["damping"],
+            env_ids=env_ids,
+        )
+        observed = {
+            "static_friction": articulation.data.joint_friction_coeff,
+            "dynamic_friction": articulation.data.joint_dynamic_friction_coeff,
+            "viscous_friction": articulation.data.joint_viscous_friction_coeff,
+            "damping": articulation.data.joint_damping,
+        }
+        mismatches = [
+            name
+            for name, expected in resistance.items()
+            if not isinstance(observed.get(name), torch.Tensor)
+            or observed[name].shape != expected.shape
+            or not torch.allclose(
+                observed[name],
+                expected,
+                rtol=0.0,
+                atol=1.0e-7,
+            )
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "Simulator mechanism-resistance readback differs from the "
+                f"joint roster for {mismatches}"
+            )
+        self._joint_roster_mechanism_resistance = resistance
+        unique_rows = torch.unique(
+            torch.stack(
+                [
+                    resistance["static_friction"][:, 0],
+                    resistance["dynamic_friction"][:, 0],
+                    resistance["viscous_friction"][:, 0],
+                    resistance["damping"][:, 0],
+                ],
+                dim=-1,
+            ),
+            dim=0,
+        )
+        print(  # noqa: T201
+            "[JointRoster] Applied per-asset mechanism resistance "
+            f"to {self.num_envs} environments: {unique_rows.cpu().tolist()}"
+        )
+
+    def _apply_joint_roster_physics_overrides(self) -> None:
+        """Apply per-slot object physics overrides to the live active articulation.
+
+        Joint-roster scenes spawn the manipuland as ``ActiveArticulation`` (frame
+        helper + tracked panel link), which the legacy rigid-object
+        ``_apply_target_object_mass_overrides`` skips. Each slot's override dict
+        comes from ``manager_env.config.object_physics_overrides_path`` matched
+        on the slot's object key (resolved in the scene config). The torch
+        helper applies mass (inertia scaled by the same ratio) and optional
+        tracked-link material fields, then verifies the PhysX readback. No
+        overrides path -> every slot is {} -> no-op.
+        """
+        per_env = getattr(self._env.cfg, "joint_roster_physics_overrides", None)
+        if not per_env or not any(per_env):
+            return
+        from gear_sonic.rp2.joint_roster_physics import apply_joint_roster_physics_overrides
+
+        articulations = getattr(self._env.scene, "articulations", {})
+        if "active_articulation" not in articulations:
+            raise ValueError("Joint-roster physics overrides require the active articulation")
+        articulation = articulations["active_articulation"]
+        tracked = str(
+            getattr(self._env.cfg, "config", {}).get(
+                "active_articulation_tracked_body_name", "panel"
+            )
+            or "panel"
+        )
+        report = apply_joint_roster_physics_overrides(
+            articulation.root_physx_view,
+            body_names=list(articulation.body_names),
+            tracked_body=tracked,
+            per_env=list(per_env),
+            num_envs=self.num_envs,
+        )
+        if report is None:
+            return
+        runtime_mass = report.pop("runtime_tracked_mass", None)
+        if runtime_mass is not None:
+            # Keep the readback separately from the metric tensor: CommandTerm.reset
+            # zeroes every metric for the reset envs, so the metric is refilled
+            # from this copy at each resample (see _resample_command).
+            self._object_runtime_mass_kg = runtime_mass.to(self.device, torch.float32)
+            self.metrics["rp2_object/runtime_mass_kg"] = self._object_runtime_mass_kg.clone()
+        self._joint_roster_physics_overrides_report = report
+        print(  # noqa: T201
+            f"[JointRoster] Applied per-slot physics overrides: {report}"
+        )
+
+    def _refresh_joint_roster_runtime_mass_metric(self, env_ids: torch.Tensor) -> None:
+        """Refill the roster-mode runtime-mass metric after the per-reset metric zeroing."""
+        if getattr(self, "_joint_roster_physics_overrides_report", None) is None:
+            return
+        metric = self.metrics.get("rp2_object/runtime_mass_kg")
+        if metric is None or env_ids.numel() == 0:
+            return
+        metric[env_ids] = self._object_runtime_mass_kg[env_ids]
+
+    def _load_object_roles(self, path: str | None) -> dict:
+        """Load optional object-role metadata for audit and future reward routing."""
+        default_roles = {
+            "default": {
+                "role": "context",
+                "dynamic": False,
+                "targetable": False,
+                "reward_target": False,
+            },
+            "rules": [],
+        }
+        if not path:
+            return default_roles
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            print(f"[ObjectAudit] Role metadata missing: {path}")  # noqa: T201
+            return default_roles
+        with open(path) as f:
+            data = json.load(f)
+        data.setdefault("default", default_roles["default"])
+        data.setdefault("rules", [])
+        print(f"[ObjectAudit] Loaded object roles from {path}")  # noqa: T201
+        return data
+
+    def _object_role_for_stem(self, stem: str) -> dict:
+        role = dict(self._object_roles.get("default", {}))
+        object_roles = self._object_roles.get("objects", {})
+        exact = object_roles.get(stem)
+        if exact:
+            role.update(exact)
+        # Per-motion paired USD stems use ``clip_key__object_name``. The
+        # clip-level entry owns target-specific semantics such as body support
+        # versus hand manipulation, while the object-level entry supplies the
+        # reusable asset defaults.
+        if "__" in stem:
+            clip_key = stem.rsplit("__", 1)[0]
+            clip_role = object_roles.get(clip_key)
+            if clip_role:
+                role.update(clip_role)
+        for rule in self._object_roles.get("rules", []):
+            contains = rule.get("contains")
+            pattern = rule.get("match")
+            matched = bool(contains and contains in stem)
+            if pattern:
+                matched = matched or re.search(pattern, stem) is not None
+            if not matched:
+                continue
+            for key, value in rule.items():
+                if key not in {"contains", "match"}:
+                    role[key] = value
+        return role
+
+    def _object_stems_for_motion_key(
+        self, motion_key: str, max_objects: int | None = None
+    ) -> list[str]:
+        stems_by_motion = getattr(self._env.cfg, "object_usd_stems_by_motion", None) or {}
+        stems = (
+            stems_by_motion.get(motion_key)
+            or getattr(self._env.cfg, "object_usd_stems", None)
+            or []
+        )
+        if not stems:
+            # Normalized rigid and articulated entities are spawned through
+            # ActiveArticulation rather than the legacy Object branch. Keep
+            # their per-env USD stem paired with the motion so role/contact
+            # gates resolve exactly as they do for rigid-object scenes.
+            active_stems = list(
+                getattr(self._env.cfg, "active_articulation_usd_stems", None)
+                or []
+            )
+            motion_keys = list(getattr(self.motion_lib, "curr_motion_keys", []) or [])
+            if len(active_stems) == len(motion_keys):
+                stem_by_motion = getattr(
+                    self, "_active_articulation_stem_by_motion", None
+                )
+                if stem_by_motion is None:
+                    stem_by_motion = dict(zip(motion_keys, active_stems, strict=True))
+                    self._active_articulation_stem_by_motion = stem_by_motion
+                active_stem = stem_by_motion.get(motion_key)
+                stems = [active_stem] if active_stem is not None else []
+        stems = list(stems)
+        if max_objects is not None:
+            stems = stems[:max_objects]
+        return stems
+
+    def _target_object_stems_for_env_ids(self, env_ids: torch.Tensor) -> list[str | None]:
+        """Resolve each environment's selected object stem in motion order."""
+        if env_ids.numel() == 0:
+            return []
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        motion_ids = self.motion_ids[env_ids].detach().cpu().tolist()
+        target_indices = self.target_object_indices()[env_ids].detach().cpu().tolist()
+        stems_out: list[str | None] = []
+        for motion_id, target_index in zip(motion_ids, target_indices, strict=False):
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            stems = self._object_stems_for_motion_key(
+                motion_key, max_objects=max_objects
+            )
+            index = int(target_index)
+            stems_out.append(stems[index] if 0 <= index < len(stems) else None)
+        return stems_out
+
+    def _target_object_role_mask(self, role_names: Sequence[str] | str | None) -> torch.Tensor:
+        """Return the per-env selected-target mask for the requested roles."""
+        if not role_names:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if isinstance(role_names, str):
+            role_names = [role_names]
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        role_mask = torch.zeros(
+            self.num_envs, max_objects, dtype=torch.bool, device=self.device
+        )
+        cache = getattr(self, "_object_role_mask_cache", {}) or {}
+        for role_name in role_names:
+            cached = cache.get(str(role_name))
+            if cached is not None and cached.shape == role_mask.shape:
+                role_mask |= cached.to(device=self.device, dtype=torch.bool)
+        indices = self.target_object_indices().clamp(0, max_objects - 1)
+        return role_mask.gather(1, indices[:, None]).squeeze(1)
+
+    def _apply_target_object_mass_overrides(self, env_ids: torch.Tensor):
+        """Apply per-motion rigid-object masses after motion assignment."""
+        if not self.cfg.object_mass_from_physics_overrides:
+            return
+        if self._multi_object_mode or "object" not in self._env.scene.rigid_objects:
+            return
+        overrides = getattr(
+            self._env.cfg, "object_physics_overrides_by_stem", {}
+        ) or {}
+        stems = self._target_object_stems_for_env_ids(env_ids)
+        requested = []
+        for stem in stems:
+            physics = overrides.get(stem, {}) if stem is not None else {}
+            mass = physics.get("mass")
+            requested.append(float(mass) if mass is not None else None)
+        if not any(mass is not None for mass in requested):
+            return
+
+        obj = self._env.scene["object"]
+        masses = obj.root_physx_view.get_masses().clone()
+        inertias = obj.root_physx_view.get_inertias().clone()
+        env_ids_cpu = env_ids.detach().cpu().to(dtype=torch.int32)
+        for env_id, target_mass in zip(
+            env_ids_cpu.tolist(), requested, strict=False
+        ):
+            if target_mass is None:
+                continue
+            old_mass = masses[env_id].sum().clamp_min(1.0e-8)
+            ratio = float(target_mass) / float(old_mass)
+            masses[env_id] *= ratio
+            inertias[env_id] *= ratio
+        obj.root_physx_view.set_masses(masses, env_ids_cpu)
+        obj.root_physx_view.set_inertias(inertias, env_ids_cpu)
+
+        if not hasattr(self, "_object_runtime_mass_kg"):
+            self._object_runtime_mass_kg = torch.zeros(
+                self.num_envs, dtype=torch.float32, device=self.device
+            )
+        actual = masses[env_ids_cpu.long()].sum(dim=-1).to(self.device)
+        self._object_runtime_mass_kg[env_ids] = actual
+        self.metrics["rp2_object/runtime_mass_kg"] = self._object_runtime_mass_kg
+
+    def _refresh_object_metadata_cache(self, env_ids: Sequence[int] | None = None):
+        """Cache per-env object validity, role priority, and BPS tensors on device.
+
+        RP2 full-scene metadata is motion-specific but only changes when an env is
+        assigned a new motion. Keep the small Python/JSON work on reset instead of
+        repeating it in observations, rewards, and contact routing every step.
+        """
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        bps_dim = int(getattr(self.motion_lib, "_bps_dim", 0) or 0)
+        needs_alloc = (
+            not hasattr(self, "_object_valid_mask_cache")
+            or self._object_valid_mask_cache.shape != (self.num_envs, max_objects)
+            or self._object_valid_mask_cache.device != torch.device(self.device)
+        )
+        if needs_alloc:
+            self._object_valid_mask_cache = torch.ones(
+                self.num_envs, max_objects, dtype=torch.bool, device=self.device
+            )
+            self._object_role_priority_cache = torch.full(
+                (self.num_envs, max_objects), 3, dtype=torch.long, device=self.device
+            )
+            if bps_dim > 0:
+                self._object_bps_all_cache = torch.zeros(
+                    self.num_envs, max_objects, bps_dim, dtype=torch.float32, device=self.device
+                )
+            else:
+                self._object_bps_all_cache = None
+            self._object_role_mask_cache = {}
+
+        if env_ids is None:
+            env_ids_t = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids_t = env_ids.to(device=self.device, dtype=torch.long)
+        else:
+            env_ids_t = torch.tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids_t.numel() == 0:
+            return
+
+        self._object_valid_mask_cache[env_ids_t] = False
+        self._object_role_priority_cache[env_ids_t] = 4
+        if getattr(self, "_object_bps_all_cache", None) is not None:
+            self._object_bps_all_cache[env_ids_t] = 0.0
+        role_mask_cache = getattr(self, "_object_role_mask_cache", {})
+        for role_mask in role_mask_cache.values():
+            role_mask[env_ids_t] = False
+
+        bps_lookup = getattr(self.motion_lib, "_bps_lookup", None) or {}
+        motion_ids_cpu = self.motion_ids[env_ids_t].detach().cpu().tolist()
+        env_ids_cpu = env_ids_t.detach().cpu().tolist()
+        common_roles = {
+            "manipuland",
+            "moving_support",
+            "articulated_part",
+            "support",
+            "articulated_context",
+            "context",
+            "contact_semantics:hand_manipulation",
+            "contact_semantics:body_support",
+        }
+        for role_name in common_roles:
+            role_mask_cache.setdefault(
+                role_name,
+                torch.zeros(
+                    self.num_envs, max_objects, dtype=torch.bool, device=self.device
+                ),
+            )
+        for env_id, motion_id in zip(env_ids_cpu, motion_ids_cpu, strict=False):
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            stems = self._object_stems_for_motion_key(motion_key, max_objects=max_objects)
+            count = min(max_objects, len(stems) if stems else max_objects)
+            if count <= 0:
+                count = max_objects
+            self._object_valid_mask_cache[env_id, :count] = True
+            for obj_idx, stem in enumerate(stems[:max_objects]):
+                role = self._object_role_for_stem(stem)
+                if bool(role.get("reward_target", False)):
+                    priority = 0
+                elif role.get("role") == "manipuland":
+                    priority = 1
+                elif bool(role.get("targetable", False)):
+                    priority = 2
+                else:
+                    priority = 3
+                self._object_role_priority_cache[env_id, obj_idx] = priority
+                role_name = str(role.get("role", "unknown"))
+                if role_name and role_name != "unknown":
+                    role_mask_cache.setdefault(
+                        role_name,
+                        torch.zeros(
+                            self.num_envs, max_objects, dtype=torch.bool, device=self.device
+                        ),
+                    )[env_id, obj_idx] = True
+                contact_semantics = str(role.get("contact_semantics", ""))
+                semantic_key = f"contact_semantics:{contact_semantics}"
+                if contact_semantics:
+                    role_mask_cache.setdefault(
+                        semantic_key,
+                        torch.zeros(
+                            self.num_envs,
+                            max_objects,
+                            dtype=torch.bool,
+                            device=self.device,
+                        ),
+                    )[env_id, obj_idx] = True
+                if getattr(self, "_object_bps_all_cache", None) is not None:
+                    vec = bps_lookup.get(stem)
+                    if vec is not None:
+                        self._object_bps_all_cache[env_id, obj_idx] = torch.as_tensor(
+                            vec, dtype=torch.float32, device=self.device
+                        )
+        self._object_role_mask_cache = role_mask_cache
+
+    def _target_object_index_for_motion_key(
+        self,
+        motion_key: str,
+        max_objects: int | None = None,
+        candidate_indices: Sequence[int] | None = None,
+    ) -> int:
+        stems = self._object_stems_for_motion_key(motion_key, max_objects=max_objects)
+        if not stems and not candidate_indices:
+            return 0
+
+        if candidate_indices:
+            candidates = [
+                int(idx)
+                for idx in candidate_indices
+                if int(idx) >= 0 and (max_objects is None or int(idx) < max_objects)
+            ]
+        else:
+            candidates = list(range(len(stems)))
+        if not candidates:
+            return 0
+
+        priority_checks = (
+            lambda role: bool(role.get("reward_target", False)),
+            lambda role: role.get("role") == "manipuland",
+            lambda role: bool(role.get("targetable", False)),
+        )
+        roles = [self._object_role_for_stem(stem) for stem in stems]
+        for check in priority_checks:
+            for idx in candidates:
+                if idx < len(roles) and check(roles[idx]):
+                    return idx
+        return candidates[0]
+
+    def target_object_indices(self) -> torch.Tensor:
+        """Return the per-env reference object index used by HOI obs/rewards.
+
+        Legacy datasets fall back to index 0. Full-scene RP2 datasets may provide
+        dynamic per-frame object masks. Those masks pick the active object set
+        first; role metadata only breaks ties for legacy single-target terms.
+        """
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        if max_objects <= 1:
+            cached = getattr(self, "_single_target_object_indices", None)
+            if (
+                cached is None
+                or cached.shape[0] != self.num_envs
+                or cached.device != self.device
+            ):
+                cached = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+                self._single_target_object_indices = cached
+            return cached
+        valid = getattr(self, "_object_valid_mask_cache", None)
+        priority = getattr(self, "_object_role_priority_cache", None)
+        if (
+            valid is not None
+            and priority is not None
+            and valid.shape == (self.num_envs, max_objects)
+            and priority.shape == (self.num_envs, max_objects)
+        ):
+            candidate = valid
+            if bool(getattr(self.cfg, "use_dynamic_target_object_mask", True)):
+                active_mask = self.object_interaction_mask
+                if active_mask is not None:
+                    active_mask = active_mask.to(self.device)
+                    if active_mask.ndim == 1:
+                        active_mask = active_mask.view(-1, 1)
+                    else:
+                        active_mask = active_mask.reshape(active_mask.shape[0], -1)
+                    if active_mask.shape[1] < max_objects:
+                        padded = torch.zeros(
+                            self.num_envs,
+                            max_objects,
+                            dtype=active_mask.dtype,
+                            device=self.device,
+                        )
+                        padded[:, : active_mask.shape[1]] = active_mask
+                        active_mask = padded
+                    candidate = (active_mask[:, :max_objects] > 0.5) & valid
+                    no_active = ~candidate.any(dim=-1)
+                    candidate = torch.where(no_active[:, None], valid, candidate)
+            scores = priority.masked_fill(~candidate, 1000)
+            indices = scores.argmin(dim=-1)
+            has_candidate = candidate.any(dim=-1)
+            return torch.where(
+                has_candidate,
+                indices,
+                torch.zeros(self.num_envs, dtype=torch.long, device=self.device),
+            )
+        motion_ids = self.motion_ids.detach().cpu().tolist()
+        active_mask = None
+        if bool(getattr(self.cfg, "use_dynamic_target_object_mask", True)):
+            active_mask = self.object_interaction_mask
+            if active_mask is not None:
+                active_mask = active_mask.detach().cpu()
+                if active_mask.ndim == 1:
+                    active_mask = active_mask.view(-1, 1)
+                else:
+                    active_mask = active_mask.reshape(active_mask.shape[0], -1)
+                if active_mask.shape[1] < max_objects:
+                    padded = torch.zeros(
+                        active_mask.shape[0], max_objects, dtype=active_mask.dtype
+                    )
+                    padded[:, : active_mask.shape[1]] = active_mask
+                    active_mask = padded
+        indices = []
+        for env_idx, motion_id in enumerate(motion_ids):
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            candidates = None
+            if active_mask is not None and env_idx < active_mask.shape[0]:
+                candidates = torch.nonzero(active_mask[env_idx] > 0.5, as_tuple=False).flatten()
+                candidates = candidates.tolist()
+                if not candidates:
+                    candidates = None
+            idx = self._target_object_index_for_motion_key(
+                motion_key, max_objects=max_objects, candidate_indices=candidates
+            )
+            indices.append(max(0, min(idx, max_objects - 1)))
+        return torch.tensor(indices, device=self.device, dtype=torch.long)
+
+    def _get_object_mask(self, mask_name: str) -> torch.Tensor | None:
+        getter = getattr(self.motion_lib, f"get_{mask_name}", None)
+        if getter is None:
+            return None
+        return getter(self.motion_ids, self.motion_start_time_steps + self.time_steps)
+
+    @property
+    def object_interaction_mask(self) -> torch.Tensor | None:
+        return self._get_object_mask("object_interaction_mask")
+
+    @property
+    def object_motion_mask(self) -> torch.Tensor | None:
+        return self._get_object_mask("object_motion_mask")
+
+    def _object_role_names_by_env(self, max_objects: int) -> list[list[str]]:
+        motion_ids_cpu = self.motion_ids.detach().cpu().tolist()
+        roles_by_env = []
+        for motion_id in motion_ids_cpu:
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            stems = self._object_stems_for_motion_key(motion_key, max_objects=max_objects)
+            role_names = [
+                str(self._object_role_for_stem(stem).get("role", "unknown"))
+                for stem in stems[:max_objects]
+            ]
+            if len(role_names) < max_objects:
+                role_names.extend(["padding"] * (max_objects - len(role_names)))
+            roles_by_env.append(role_names)
+        return roles_by_env
+
+    def _multi_object_contact_force_by_sensor_key(
+        self, sensor_key: str, max_objects: int
+    ) -> torch.Tensor | None:
+        contact_map = getattr(self._env.cfg, "multi_object_contact_sensor_map", {}) or {}
+        if not contact_map:
+            return None
+        scene = getattr(self._env, "scene", None)
+        sensors = getattr(scene, "sensors", {}) if scene is not None else {}
+        if not isinstance(sensors, dict):
+            return None
+
+        stems_by_motion = getattr(self._env.cfg, "object_usd_stems_by_motion", None) or {}
+        global_stems = getattr(self._env.cfg, "object_usd_stems", None) or []
+        slot_count = int(getattr(self._env.cfg, "object_usd_slot_count", 0) or 0)
+        motion_ids_cpu = self.motion_ids.detach().cpu().tolist()
+        force_by_object = torch.zeros(
+            self.num_envs, max_objects, dtype=torch.float32, device=self.device
+        )
+        found_any = False
+
+        for env_idx, motion_id in enumerate(motion_ids_cpu):
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            stems = stems_by_motion.get(motion_key) or global_stems
+            for obj_idx, stem in enumerate(stems[:max_objects]):
+                if slot_count > 0:
+                    entry = contact_map.get(str(obj_idx))
+                else:
+                    entry = contact_map.get(str(stem).replace("-", "_"))
+                if not entry:
+                    continue
+                sensor_name = entry.get(sensor_key)
+                if not sensor_name or sensor_name not in sensors:
+                    continue
+                data = getattr(sensors[sensor_name], "data", None)
+                if data is None or not hasattr(data, "force_matrix_w"):
+                    continue
+                force = data.force_matrix_w
+                if force.shape[0] <= env_idx:
+                    continue
+                force_env = force[env_idx]
+                force_by_object[env_idx, obj_idx] = torch.norm(force_env, dim=-1).sum()
+                found_any = True
+        return force_by_object if found_any else None
+
+    def _update_rp2_body_support_metrics(self):
+        body_error = torch.norm(self.body_pos_relative_w - self.robot_body_pos_w, dim=-1)
+        self.metrics["rp2_object_body_pos_error/mean"] = body_error.mean(dim=-1)
+        self.metrics["rp2_object_body_pos_error/max"] = body_error.max(dim=-1).values
+
+        ee_body_names = getattr(
+            self.cfg,
+            "rp2_ee_body_height_metric_names",
+            [
+                "left_ankle_roll_link",
+                "right_ankle_roll_link",
+                "left_wrist_yaw_link",
+                "right_wrist_yaw_link",
+            ],
+        )
+        ee_indices = _get_body_indexes(self, list(ee_body_names))
+        if ee_indices:
+            height_error = (
+                self.body_pos_relative_w[:, ee_indices, 2]
+                - self.robot_body_pos_w[:, ee_indices, 2]
+            ).abs()
+            threshold = float(getattr(self.cfg, "rp2_ee_body_height_metric_threshold", 0.25))
+            self.metrics["rp2_object_ee_body_height_error/mean"] = height_error.mean(dim=-1)
+            self.metrics["rp2_object_ee_body_height_error/max"] = height_error.max(dim=-1).values
+            self.metrics["rp2_object_ee_body_height_deviation_count/all"] = (
+                height_error > threshold
+            ).float().sum(dim=-1)
+
+        support_body_names = getattr(
+            self.cfg,
+            "rp2_support_body_metric_names",
+            [
+                "pelvis",
+                "torso_link",
+                "left_hip_roll_link",
+                "left_knee_link",
+                "right_hip_roll_link",
+                "right_knee_link",
+            ],
+        )
+        support_indices = _get_body_indexes(self, list(support_body_names))
+        if support_indices:
+            support_error = body_error[:, support_indices]
+            self.metrics["rp2_object_support_body_pos_error/mean"] = support_error.mean(dim=-1)
+            self.metrics["rp2_object_support_body_pos_error/max"] = (
+                support_error.max(dim=-1).values
+            )
+
+    def _update_rp2_object_role_metrics(self):
+        """Log per-role active counts and object position error without affecting reward."""
+        if not bool(getattr(self.cfg, "enable_rp2_object_role_metrics", True)):
+            return
+        if not hasattr(self.motion_lib, "max_num_objects"):
+            return
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        if max_objects <= 1 or not hasattr(self, "object_root_pos"):
+            return
+
+        current_pos, current_quat, _, _, valid = mdp_utils.get_all_object_current_state(
+            self._env, self, max_objects=max_objects
+        )
+        target_pos = self.object_root_pos[:, :max_objects]
+        target_quat = self.object_root_quat[:, :max_objects]
+        pos_error = torch.norm(target_pos - current_pos, dim=-1)
+        ori_error = quat_error_magnitude(
+            target_quat.reshape(-1, 4), current_quat.reshape(-1, 4)
+        ).reshape(self.num_envs, max_objects)
+        height_error = torch.abs(target_pos[..., 2] - current_pos[..., 2])
+        up_axis = torch.zeros(self.num_envs, max_objects, 3, device=self.device)
+        up_axis[..., 2] = 1.0
+        current_up = quat_apply(current_quat.reshape(-1, 4), up_axis.reshape(-1, 3)).reshape(
+            self.num_envs, max_objects, 3
+        )
+        tilt_deg = torch.rad2deg(torch.acos(torch.clamp(current_up[..., 2], -1.0, 1.0)))
+        support_contact_force = self._multi_object_contact_force_by_sensor_key(
+            "support_body_sensor", max_objects
+        )
+
+        mask = self.object_interaction_mask
+        if mask is None:
+            active = valid
+        else:
+            active = (mask[:, :max_objects] > 0.5) & valid
+
+        active_f = active.float()
+        active_denom = active_f.sum(dim=-1).clamp_min(1.0)
+        self.metrics["rp2_object_active_count/all"] = active_f.sum(dim=-1)
+        self.metrics["rp2_object_pos_error/active_all"] = (
+            pos_error * active_f
+        ).sum(dim=-1) / active_denom
+        active_pos_error = torch.where(active, pos_error, torch.zeros_like(pos_error))
+        self.metrics["rp2_object_pos_error_max/active_all"] = active_pos_error.max(dim=-1).values
+        self.metrics["rp2_object_valid_count/all"] = valid.float().sum(dim=-1)
+        pos_reward_coeff = float(getattr(self.cfg, "rp2_role_metric_pos_exp_coeff", -100.0))
+        pos_reward = torch.exp(pos_reward_coeff * pos_error)
+        self.metrics["rp2_object_pos_reward/active_all"] = (
+            pos_reward * active_f
+        ).sum(dim=-1) / active_denom
+        deviation_threshold = float(
+            getattr(self.cfg, "rp2_role_metric_pos_deviation_threshold", 0.1)
+        )
+        deviated = (pos_error > deviation_threshold) & active
+        self.metrics["rp2_object_deviation_count/all"] = deviated.float().sum(dim=-1)
+        active_height_error = torch.where(active, height_error, torch.zeros_like(height_error))
+        active_ori_error = torch.where(active, ori_error, torch.zeros_like(ori_error))
+        active_tilt_deg = torch.where(active, tilt_deg, torch.zeros_like(tilt_deg))
+        self.metrics["rp2_object_height_error/active_all"] = (
+            height_error * active_f
+        ).sum(dim=-1) / active_denom
+        self.metrics["rp2_object_ori_error/active_all"] = (
+            ori_error * active_f
+        ).sum(dim=-1) / active_denom
+        self.metrics["rp2_object_tilt_deg_max/active_all"] = active_tilt_deg.max(dim=-1).values
+        self.metrics["rp2_object_height_error_max/active_all"] = (
+            active_height_error.max(dim=-1).values
+        )
+        self.metrics["rp2_object_ori_error_max/active_all"] = (
+            active_ori_error.max(dim=-1).values
+        )
+        if support_contact_force is not None:
+            self.metrics["rp2_object_support_contact_force/active_all"] = (
+                support_contact_force * active_f
+            ).sum(dim=-1) / active_denom
+
+        roles_by_env = self._object_role_names_by_env(max_objects)
+        role_names = {
+            role
+            for roles in roles_by_env
+            for role in roles
+            if role not in {"padding", "unknown"}
+        }
+        role_names.update(
+            {
+                "manipuland",
+                "moving_support",
+                "articulated_part",
+                "support",
+                "articulated_context",
+            }
+        )
+
+        for role_name in sorted(role_names):
+            role_mask = torch.zeros(
+                self.num_envs, max_objects, dtype=torch.bool, device=self.device
+            )
+            for env_idx, roles in enumerate(roles_by_env):
+                for obj_idx, role in enumerate(roles[:max_objects]):
+                    if role == role_name:
+                        role_mask[env_idx, obj_idx] = True
+            role_active = active & role_mask
+            role_valid = valid & role_mask
+            role_active_f = role_active.float()
+            role_valid_f = role_valid.float()
+            denom = role_active_f.sum(dim=-1).clamp_min(1.0)
+            valid_denom = role_valid_f.sum(dim=-1).clamp_min(1.0)
+            self.metrics[f"rp2_object_active_count/{role_name}"] = role_active_f.sum(dim=-1)
+            self.metrics[f"rp2_object_pos_error/{role_name}"] = (
+                pos_error * role_active_f
+            ).sum(dim=-1) / denom
+            role_pos_error = torch.where(role_active, pos_error, torch.zeros_like(pos_error))
+            self.metrics[f"rp2_object_pos_error_max/{role_name}"] = (
+                role_pos_error.max(dim=-1).values
+            )
+            self.metrics[f"rp2_object_pos_reward/{role_name}"] = (
+                pos_reward * role_active_f
+            ).sum(dim=-1) / denom
+            self.metrics[f"rp2_object_deviation_count/{role_name}"] = (
+                (deviated & role_mask).float().sum(dim=-1)
+            )
+            self.metrics[f"rp2_object_height_error/{role_name}"] = (
+                height_error * role_valid_f
+            ).sum(dim=-1) / valid_denom
+            self.metrics[f"rp2_object_height_error_max/{role_name}"] = (
+                torch.where(role_valid, height_error, torch.zeros_like(height_error))
+                .max(dim=-1)
+                .values
+            )
+            self.metrics[f"rp2_object_ori_error/{role_name}"] = (
+                ori_error * role_valid_f
+            ).sum(dim=-1) / valid_denom
+            self.metrics[f"rp2_object_ori_error_max/{role_name}"] = (
+                torch.where(role_valid, ori_error, torch.zeros_like(ori_error))
+                .max(dim=-1)
+                .values
+            )
+            self.metrics[f"rp2_object_tilt_deg_max/{role_name}"] = (
+                torch.where(role_valid, tilt_deg, torch.zeros_like(tilt_deg))
+                .max(dim=-1)
+                .values
+            )
+            if support_contact_force is not None:
+                self.metrics[f"rp2_object_support_contact_force/{role_name}"] = (
+                    support_contact_force * role_valid_f
+                ).sum(dim=-1) / valid_denom
+                self.metrics[f"rp2_object_support_contact_force_active/{role_name}"] = (
+                    support_contact_force * role_active_f
+                ).sum(dim=-1) / denom
+        self._update_rp2_body_support_metrics()
+
+    def object_contact_mask(self, hand: str = "right_hand") -> torch.Tensor | None:
+        return self.motion_lib.get_object_contact_mask(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps, hand=hand
+        )
+
+    @staticmethod
+    def _gather_object_by_index(object_tensor: torch.Tensor, object_indices: torch.Tensor):
+        if object_tensor.ndim == 3:
+            env_ids = torch.arange(object_tensor.shape[0], device=object_tensor.device)
+            return object_tensor[env_ids, object_indices]
+        if object_tensor.ndim == 4:
+            expand_shape = (
+                object_tensor.shape[0],
+                object_tensor.shape[1],
+                1,
+                object_tensor.shape[-1],
+            )
+            gather_idx = object_indices.view(-1, 1, 1, 1).expand(expand_shape)
+            return torch.gather(object_tensor, dim=2, index=gather_idx).squeeze(2)
+        raise ValueError(f"Expected object tensor with 3 or 4 dims, got {object_tensor.shape}")
+
+    @staticmethod
+    def _object_mask_for_audit(
+        mask: torch.Tensor | None,
+        env_ids: torch.Tensor,
+        max_objects: int,
+    ) -> torch.Tensor | None:
+        if mask is None:
+            return None
+        selected = mask[env_ids].detach().cpu()
+        if selected.ndim == 1:
+            selected = selected.view(-1, 1)
+        else:
+            selected = selected.reshape(selected.shape[0], -1)
+        if selected.shape[1] >= max_objects:
+            return selected[:, :max_objects]
+        padded = torch.zeros(selected.shape[0], max_objects, dtype=selected.dtype)
+        padded[:, : selected.shape[1]] = selected
+        return padded
+
+    @property
+    def target_object_root_pos(self) -> torch.Tensor:
+        if self.object_root_pos.ndim == 3 and self.object_root_pos.shape[1] == 1:
+            return self.object_root_pos[:, 0]
+        return self._gather_object_by_index(self.object_root_pos, self.target_object_indices())
+
+    @property
+    def target_object_root_quat(self) -> torch.Tensor:
+        if self.object_root_quat.ndim == 3 and self.object_root_quat.shape[1] == 1:
+            return self.object_root_quat[:, 0]
+        return self._gather_object_by_index(self.object_root_quat, self.target_object_indices())
+
+    @property
+    def target_object_root_pos_multi_future(self) -> torch.Tensor:
+        if (
+            self.object_root_pos_multi_future.ndim == 4
+            and self.object_root_pos_multi_future.shape[2] == 1
+        ):
+            return self.object_root_pos_multi_future[:, :, 0]
+        return self._gather_object_by_index(
+            self.object_root_pos_multi_future, self.target_object_indices()
+        )
+
+    @property
+    def target_object_root_quat_multi_future(self) -> torch.Tensor:
+        if (
+            self.object_root_quat_multi_future.ndim == 4
+            and self.object_root_quat_multi_future.shape[2] == 1
+        ):
+            return self.object_root_quat_multi_future[:, :, 0]
+        return self._gather_object_by_index(
+            self.object_root_quat_multi_future, self.target_object_indices()
+        )
+
+    @property
+    def target_object_lin_vel(self) -> torch.Tensor:
+        object_lin_vel = self.motion_lib.get_object_lin_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+        if object_lin_vel.ndim == 3 and object_lin_vel.shape[1] == 1:
+            return object_lin_vel[:, 0]
+        return self._gather_object_by_index(object_lin_vel, self.target_object_indices())
+
+    @property
+    def target_object_ang_vel(self) -> torch.Tensor:
+        object_ang_vel = self.motion_lib.get_object_ang_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+        if object_ang_vel.ndim == 3 and object_ang_vel.shape[1] == 1:
+            return object_ang_vel[:, 0]
+        return self._gather_object_by_index(object_ang_vel, self.target_object_indices())
+
+    @property
+    def target_object_bps(self) -> torch.Tensor:
+        max_objects = int(getattr(self.motion_lib, "max_num_objects", 1) or 1)
+        if max_objects <= 1:
+            return self.object_bps
+
+        bps_lookup = getattr(self.motion_lib, "_bps_lookup", None)
+        bps_dim = int(getattr(self.motion_lib, "_bps_dim", 0) or 0)
+        if not bps_lookup or bps_dim <= 0:
+            return self.motion_lib.get_object_bps(self.motion_ids)
+
+        rows = []
+        motion_ids = self.motion_ids.detach().cpu().tolist()
+        indices = self.target_object_indices().detach().cpu().tolist()
+        for motion_id, object_idx in zip(motion_ids, indices, strict=False):
+            motion_key = self.motion_lib.curr_motion_keys[int(motion_id)]
+            stems = self._object_stems_for_motion_key(
+                motion_key, max_objects=getattr(self.motion_lib, "max_num_objects", None)
+            )
+            stem = stems[object_idx] if object_idx < len(stems) else os.path.basename(motion_key)
+            vec = bps_lookup.get(stem)
+            if vec is None:
+                vec = np.zeros(bps_dim, dtype=np.float32)
+            rows.append(torch.as_tensor(vec, device=self.device, dtype=torch.float32))
+        return torch.stack(rows, dim=0)
+
+    def _next_object_audit_reset_index(self) -> int | None:
+        if not self._object_audit_path:
+            return None
+        if (
+            self._object_audit_max_resets > 0
+            and self._object_audit_reset_calls >= self._object_audit_max_resets
+        ):
+            return None
+        self._object_audit_reset_calls += 1
+        return self._object_audit_reset_calls
+
+    def _append_full_scene_reset_audit(
+        self,
+        reset_index: int,
+        motion_id: int,
+        motion_key: str,
+        env_ids: torch.Tensor,
+        object_scene_keys: list[str],
+        all_object_keys: list[str],
+        object_pos: torch.Tensor,
+        object_quat: torch.Tensor,
+        reference_time_steps: torch.Tensor | None = None,
+    ):
+        stems_by_motion = getattr(self._env.cfg, "object_usd_stems_by_motion", None) or {}
+        stems = stems_by_motion.get(motion_key)
+        if not stems:
+            all_stems = list(getattr(self._env.cfg, "object_usd_stems", []) or [])
+            if (
+                self.cfg.use_paired_motions
+                and len(all_stems) == len(self.motion_lib.curr_motion_keys)
+                and 0 <= int(motion_id) < len(all_stems)
+            ):
+                stems = [all_stems[int(motion_id)]]
+            else:
+                stems = all_stems
+        stems = list(stems)[: len(object_scene_keys)]
+        bps_dir = None
+        if isinstance(self.cfg.motion_lib_cfg, dict):
+            bps_dir = self.cfg.motion_lib_cfg.get("bps_dir")
+
+        env_ids_cpu = env_ids.detach().cpu().tolist()
+        start_steps = self.motion_start_time_steps[env_ids].detach().cpu().tolist()
+        if reference_time_steps is None:
+            reference_steps = start_steps
+        else:
+            reference_steps = reference_time_steps.detach().cpu().tolist()
+        motion_steps = self.motion_num_steps[env_ids].detach().cpu().tolist()
+        object_pos_cpu = object_pos.detach().cpu()
+        object_quat_cpu = object_quat.detach().cpu()
+        target_indices = self.target_object_indices()[env_ids].detach().cpu().tolist()
+        interaction_mask_cpu = self._object_mask_for_audit(
+            self.object_interaction_mask, env_ids, len(object_scene_keys)
+        )
+        motion_mask_cpu = self._object_mask_for_audit(
+            self.object_motion_mask, env_ids, len(object_scene_keys)
+        )
+        inactive_keys = sorted(set(all_object_keys) - set(object_scene_keys))
+        object_dynamics_by_stem = getattr(self._env.cfg, "object_dynamics_by_stem", {}) or {}
+        object_physics_overrides_by_stem = (
+            getattr(self._env.cfg, "object_physics_overrides_by_stem", {}) or {}
+        )
+        audit_motion_ids = self.motion_ids[env_ids]
+        audit_steps = (
+            self.motion_start_time_steps[env_ids]
+            if reference_time_steps is None
+            else reference_time_steps
+        )
+
+        def source_audit_channel(getter_name: str):
+            getter = getattr(self.motion_lib, getter_name, None)
+            if getter is None:
+                return None
+            value = getter(audit_motion_ids, audit_steps)
+            return value.detach().cpu() if isinstance(value, torch.Tensor) else None
+
+        source_relation = source_audit_channel("get_rp2_source_relation_vector")
+        source_contact = source_audit_channel("get_rp2_source_contact_probability")
+        source_root = source_audit_channel("get_rp2_source_root_pos")
+        source_object_lin_vel = source_audit_channel("get_object_lin_vel")
+        source_object_ang_vel = source_audit_channel("get_object_ang_vel")
+
+        for local_idx, env_id in enumerate(env_ids_cpu):
+            objects = []
+            for obj_idx, scene_key in enumerate(object_scene_keys):
+                stem = stems[obj_idx] if obj_idx < len(stems) else scene_key.removeprefix("object_")
+                bps_path = os.path.join(bps_dir, f"{stem}.npy") if bps_dir else None
+                objects.append(
+                    {
+                        "index": obj_idx,
+                        "stem": stem,
+                        "scene_key": scene_key,
+                        "role": self._object_role_for_stem(stem),
+                        "scene_dynamic": object_dynamics_by_stem.get(stem),
+                        "physics_override": object_physics_overrides_by_stem.get(stem, {}),
+                        "bps_path": bps_path,
+                        "bps_exists": bool(bps_path and os.path.isfile(bps_path)),
+                        "interaction_mask": (
+                            float(interaction_mask_cpu[local_idx, obj_idx])
+                            if interaction_mask_cpu is not None
+                            else None
+                        ),
+                        "motion_mask": (
+                            float(motion_mask_cpu[local_idx, obj_idx])
+                            if motion_mask_cpu is not None
+                            else None
+                        ),
+                        "selected_target": obj_idx == target_indices[local_idx],
+                        "reference_position_w": object_pos_cpu[local_idx, obj_idx].tolist(),
+                        "reference_quat_wxyz": object_quat_cpu[local_idx, obj_idx].tolist(),
+                    }
+                )
+
+            source_reference = None
+            if source_relation is not None:
+                source_reference = {
+                    "relation_vector": source_relation[local_idx].tolist(),
+                    "relation_mean_norm_m": float(
+                        torch.linalg.vector_norm(source_relation[local_idx], dim=-1)
+                        .mean()
+                        .item()
+                    ),
+                    "contact_probability": (
+                        source_contact[local_idx].tolist()
+                        if source_contact is not None
+                        else None
+                    ),
+                    "source_root_position": (
+                        source_root[local_idx].tolist() if source_root is not None else None
+                    ),
+                    "object_linear_velocity": (
+                        source_object_lin_vel[local_idx].tolist()
+                        if source_object_lin_vel is not None
+                        else None
+                    ),
+                    "object_angular_velocity": (
+                        source_object_ang_vel[local_idx].tolist()
+                        if source_object_ang_vel is not None
+                        else None
+                    ),
+                }
+
+            self._object_audit_records.append(
+                {
+                    "reset_index": reset_index,
+                    "env_id": int(env_id),
+                    "motion_id": int(motion_id),
+                    "motion_key": motion_key,
+                    "motion_start_time_step": int(start_steps[local_idx]),
+                    "reference_time_step": int(reference_steps[local_idx]),
+                    "motion_num_steps": int(motion_steps[local_idx]),
+                    "object_tensor_shape": list(object_pos.shape),
+                    "target_object_index": int(target_indices[local_idx]),
+                    "active_object_count": len(object_scene_keys),
+                    "inactive_object_count": len(inactive_keys),
+                    "inactive_scene_keys": inactive_keys,
+                    "objects": objects,
+                    "source_reference": source_reference,
+                }
+            )
+
+    def _write_object_audit(self):
+        if not self._object_audit_path:
+            return
+        rp2_reward_overrides = {
+            "soma_object_relation_weight": os.environ.get("RP2_SOMA_OBJECT_RELATION_WEIGHT"),
+            "soma_object_relation_mask_name": os.environ.get("RP2_SOMA_OBJECT_RELATION_MASK_NAME"),
+            "soma_object_relation_role_names": os.environ.get(
+                "RP2_SOMA_OBJECT_RELATION_ROLE_NAMES"
+            ),
+            "soma_object_relation_dist_exp_coeff": os.environ.get(
+                "RP2_SOMA_OBJECT_RELATION_DIST_EXP_COEFF"
+            ),
+        }
+        payload = {
+            "schema_version": 1,
+            "created_unix": self._object_audit_created_at,
+            "updated_unix": time.time(),
+            "num_envs": self.num_envs,
+            "full_scene_per_env": bool(getattr(self.cfg, "full_scene_per_env", False)),
+            "multi_object_mode": bool(self._multi_object_mode),
+            "object_roles_path": self._object_roles_path,
+            "object_usd_stems": getattr(self._env.cfg, "object_usd_stems", None),
+            "object_usd_stems_by_motion": getattr(
+                self._env.cfg, "object_usd_stems_by_motion", {}
+            ),
+            "object_dynamics_by_stem": getattr(self._env.cfg, "object_dynamics_by_stem", {}),
+            "object_physics_overrides_by_stem": getattr(
+                self._env.cfg, "object_physics_overrides_by_stem", {}
+            ),
+            "articulated_context_usd_paths": getattr(
+                self._env.cfg, "articulated_context_usd_paths", []
+            ),
+            "rp2_reward_overrides": rp2_reward_overrides,
+            "motion_keys": list(getattr(self.motion_lib, "curr_motion_keys", [])),
+            "object_mask_summary": self._object_mask_audit_summary(),
+            "contact_sensor_summary": self._contact_sensor_audit_summary(),
+            "records": self._object_audit_records,
+        }
+        tmp_path = f"{self._object_audit_path}.tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, self._object_audit_path)
+
+    def _object_mask_audit_summary(self) -> dict:
+        summary = {}
+        mask_specs = {
+            "interaction": getattr(self.motion_lib, "_motion_object_interaction_mask", None),
+            "motion": getattr(self.motion_lib, "_motion_object_motion_mask", None),
+            "contact_left": getattr(
+                self.motion_lib, "_motion_object_in_contact_left", None
+            ),
+            "contact_right": getattr(
+                self.motion_lib, "_motion_object_in_contact_right", None
+            ),
+        }
+        length_starts = getattr(self.motion_lib, "length_starts", None)
+        motion_frames = getattr(self.motion_lib, "_motion_num_frames", None)
+        motion_keys = list(getattr(self.motion_lib, "curr_motion_keys", []))
+        if length_starts is None or motion_frames is None:
+            return summary
+
+        for name, mask_tensor in mask_specs.items():
+            if mask_tensor is None:
+                summary[name] = {"available": False}
+                continue
+            mask_tensor_cpu = mask_tensor.detach().cpu()
+            per_motion = {}
+            for motion_idx, motion_key in enumerate(motion_keys):
+                start = int(length_starts[motion_idx].detach().cpu().item())
+                count = int(motion_frames[motion_idx].detach().cpu().item())
+                mask = mask_tensor_cpu[start : start + count]
+                if mask.ndim == 1:
+                    mask = mask[:, None]
+                if mask.ndim != 2:
+                    continue
+                per_motion[motion_key] = {
+                    "shape": list(mask.shape),
+                    "frames_with_any_active": int((mask > 0.5).any(dim=1).sum().item()),
+                    "active_frames_per_object": [
+                        int(v) for v in (mask > 0.5).sum(dim=0).tolist()
+                    ],
+                }
+            summary[name] = {
+                "available": True,
+                "total_active_entries": int((mask_tensor_cpu > 0.5).sum().item()),
+                "per_motion": per_motion,
+            }
+        return summary
+
+    def _contact_sensor_audit_summary(self) -> dict:
+        summary = {
+            "legacy_sensors": {},
+            "multi_object_sensor_count": 0,
+            "multi_object_sensors": {},
+            "missing_multi_object_sensors": [],
+            "support_body_sensor_count": 0,
+        }
+        scene = getattr(self._env, "scene", None)
+        sensors = getattr(scene, "sensors", {}) if scene is not None else {}
+        sensor_names = set(sensors.keys()) if isinstance(sensors, dict) else set()
+
+        def _sensor_record(sensor_name: str) -> dict:
+            if sensor_name not in sensor_names:
+                return {"available": False}
+            sensor = sensors[sensor_name]
+            cfg = getattr(sensor, "cfg", None)
+            record = {
+                "available": True,
+                "prim_path": getattr(cfg, "prim_path", None),
+                "filter_prim_paths_expr": list(getattr(cfg, "filter_prim_paths_expr", []) or []),
+            }
+            data = getattr(sensor, "data", None)
+            if data is not None and hasattr(data, "force_matrix_w"):
+                force = data.force_matrix_w
+                record["force_matrix_shape"] = list(force.shape)
+                force_mag = torch.norm(force, dim=-1)
+                record["nonzero_force_entries"] = int((force_mag > 1e-6).sum().detach().cpu().item())
+                record["force_magnitude_sum"] = float(force_mag.sum().detach().cpu().item())
+            if data is not None and hasattr(data, "net_forces_w"):
+                net = data.net_forces_w
+                record["net_forces_shape"] = list(net.shape)
+            return record
+
+        for legacy_name in (
+            "object_to_hand_contact_sensor",
+            "object_to_left_hand_contact_sensor",
+            "table_to_hand_contact_sensor",
+            "object_to_table_contact_sensor",
+        ):
+            summary["legacy_sensors"][legacy_name] = _sensor_record(legacy_name)
+
+        contact_map = getattr(self._env.cfg, "multi_object_contact_sensor_map", {}) or {}
+        for stem, entry in contact_map.items():
+            right_name = entry.get("right_hand_sensor")
+            left_name = entry.get("left_hand_sensor")
+            support_name = entry.get("support_body_sensor")
+            sensor_record = {
+                "object_index": entry.get("object_index"),
+                "object_stem": entry.get("object_stem", stem),
+                "prim_path": entry.get("prim_path"),
+                "right_hand_sensor": right_name,
+                "left_hand_sensor": left_name,
+                "support_body_sensor": support_name,
+                "right": _sensor_record(right_name) if right_name else {"available": False},
+                "left": _sensor_record(left_name) if left_name else {"available": False},
+                "support": _sensor_record(support_name) if support_name else {"available": False},
+            }
+            if support_name:
+                summary["support_body_sensor_count"] += 1
+            for sensor_name in (right_name, left_name, support_name):
+                if sensor_name and sensor_name not in sensor_names:
+                    summary["missing_multi_object_sensors"].append(sensor_name)
+            summary["multi_object_sensors"][stem] = sensor_record
+        summary["multi_object_sensor_count"] = len(contact_map)
+        return summary
 
     # =========================================================================
     # Offline (kinematic-only) factory
@@ -880,7 +2501,7 @@ class TrackingCommand(CommandTerm):
             % self.motion_lib._num_motions  # noqa: SLF001
         )[env_ids]
         sampled_times = self.motion_lib.sample_time_steps(
-            self.motion_ids[env_ids], truncate_time=None
+            self.motion_ids[env_ids], truncate_time=self.cfg.sample_start_truncate_time_s
         )
         if self.cfg.sample_from_n_initial_frames is not None:
             # Sample uniformly from first N frames
@@ -890,10 +2511,14 @@ class TrackingCommand(CommandTerm):
             )
         elif self.cfg.start_from_first_frame:
             sampled_times.zero_()
+        sampled_times = self._enforce_valid_start_window(env_ids, sampled_times)
+        sampled_times = self._constrain_to_ownership_phase(env_ids, sampled_times)
+        sampled_times = self._sample_from_reset_start_cache(env_ids, sampled_times)
         self.motion_start_time_steps[env_ids] = sampled_times
         self.motion_num_steps[env_ids] = self.motion_lib.get_motion_num_steps(
             self.motion_ids[env_ids]
         )
+        self._apply_ownership_phase_end(env_ids)
         self.time_steps[env_ids] = 0
         self.body_pos_relative_w[env_ids] = self.motion_lib.get_body_pos_w(
             self.motion_ids[env_ids], self.motion_start_time_steps[env_ids]
@@ -1816,6 +3441,146 @@ class TrackingCommand(CommandTerm):
         )
 
     @property
+    def object_root_lin_vel(self) -> torch.Tensor:
+        return self.motion_lib.get_object_lin_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def object_root_ang_vel(self) -> torch.Tensor:
+        return self.motion_lib.get_object_ang_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_root_pos(self) -> torch.Tensor:
+        root_pos = self.motion_lib.get_active_articulation_root_pos(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+        return root_pos + self._env.scene.env_origins
+
+    @property
+    def active_articulation_root_quat(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_root_quat(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_root_lin_vel(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_root_lin_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_root_ang_vel(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_root_ang_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_joint_pos(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_joint_pos(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_joint_vel(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_joint_vel(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_joint_valid_mask(self) -> torch.Tensor:
+        return self.motion_lib.get_active_articulation_joint_valid_mask(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+
+    @property
+    def active_articulation_root_dynamic_mask(self) -> torch.Tensor:
+        values = self.motion_lib.get_active_articulation_root_dynamic_mask(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+        return values.reshape(self.num_envs, -1)[:, 0] > 0.5
+
+    @property
+    def active_articulation_joint_pos_multi_future(self) -> torch.Tensor:
+        values = self.motion_lib.get_active_articulation_joint_pos(
+            self.future_motion_ids, self.future_time_steps
+        )
+        return values.view(self.num_envs, self.num_future_frames, -1)
+
+    @property
+    def active_articulation_joint_valid_mask_multi_future(self) -> torch.Tensor:
+        values = self.motion_lib.get_active_articulation_joint_valid_mask(
+            self.future_motion_ids, self.future_time_steps
+        )
+        return values.view(self.num_envs, self.num_future_frames, -1)
+
+    @property
+    def active_entity_root_pos(self) -> torch.Tensor:
+        """Reference base position for either a rigid object or articulation."""
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_root_pos
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_pos"):
+            return self.active_articulation_root_pos
+        return self.target_object_root_pos
+
+    @property
+    def active_entity_root_quat(self) -> torch.Tensor:
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_root_quat
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_quat"):
+            return self.active_articulation_root_quat
+        return self.target_object_root_quat
+
+    @property
+    def active_entity_root_lin_vel(self) -> torch.Tensor:
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_lin_vel
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_lin_vel"):
+            return self.active_articulation_root_lin_vel
+        return self.target_object_lin_vel
+
+    @property
+    def active_entity_root_ang_vel(self) -> torch.Tensor:
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_ang_vel
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_ang_vel"):
+            return self.active_articulation_root_ang_vel
+        return self.target_object_ang_vel
+
+    @property
+    def active_entity_root_pos_multi_future(self) -> torch.Tensor:
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_root_pos_multi_future
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_pos"):
+            root_pos = self.motion_lib.get_active_articulation_root_pos(
+                self.future_motion_ids, self.future_time_steps
+            ).view(self.num_envs, self.num_future_frames, 3)
+            return root_pos + self._env.scene.env_origins[:, None, :]
+        return self.target_object_root_pos_multi_future
+
+    @property
+    def active_entity_root_quat_multi_future(self) -> torch.Tensor:
+        if self._active_entity_policy_pose_mode() == "panel":
+            return self.target_object_root_quat_multi_future
+        if hasattr(self.motion_lib, "_motion_active_articulation_root_quat"):
+            return self.motion_lib.get_active_articulation_root_quat(
+                self.future_motion_ids, self.future_time_steps
+            ).view(self.num_envs, self.num_future_frames, 4)
+        return self.target_object_root_quat_multi_future
+
+    def _active_entity_policy_pose_mode(self) -> str:
+        config = getattr(self._env.cfg, "config", {}) or {}
+        mode = str(config.get("active_entity_policy_pose_mode", "frame"))
+        if mode not in {"frame", "panel"}:
+            raise ValueError(
+                "active_entity_policy_pose_mode must be 'frame' or 'panel', "
+                f"got {mode!r}"
+            )
+        return mode
+
+    @property
     def object_bps(self) -> torch.Tensor:
         """BPS shape encoding for the current object per env.
 
@@ -1909,8 +3674,8 @@ class TrackingCommand(CommandTerm):
             return None
 
         # Transform from object-local to world frame
-        obj_pos = self.object_root_pos[:, 0, :]  # (num_envs, 3)
-        obj_quat = self.object_root_quat[:, 0, :]  # (num_envs, 4)
+        obj_pos = self.target_object_root_pos
+        obj_quat = self.target_object_root_quat
 
         from gear_sonic.isaac_utils import rotations as isaac_utils_rotations  # noqa: PLC0415
 
@@ -2730,6 +4495,7 @@ class TrackingCommand(CommandTerm):
             self.metrics["error_joint_vel"] = torch.abs(self.joint_vel - self.robot_joint_vel).mean(
                 dim=-1
             )
+        self._update_rp2_object_role_metrics()
 
     def resample_all_commands(self):
         """Resample motion clips and reset state for all environments at once."""
@@ -2756,12 +4522,37 @@ class TrackingCommand(CommandTerm):
         )
         self._motion_contact_flags = None
 
+        first_contact_source = str(
+            getattr(self.cfg, "first_contact_reference_source", "legacy")
+        )
+        if first_contact_source == "canonical_active_entity_required":
+            if self.cfg.contact_file is not None:
+                raise ValueError(
+                    "canonical first-contact reset timing cannot be combined "
+                    "with a legacy contact_file"
+                )
+            if getattr(self.cfg, "reference_contact_boundary_file", None):
+                raise ValueError(
+                    "canonical first-contact reset timing cannot be combined "
+                    "with a legacy reference_contact_boundary_file"
+                )
+            self._derive_first_contact_from_motion_lib()
+            self._build_first_contact_lookup()
+            return
+        if first_contact_source != "legacy":
+            raise ValueError(
+                "Unsupported first_contact_reference_source "
+                f"{first_contact_source!r}"
+            )
+
         if self.cfg.contact_file is None or not os.path.exists(self.cfg.contact_file):
             # Derive first contact frames from motion_lib's in_contact labels
             # These are computed from contact_points_right_hand in the object motions pkl.
             # Always attempt this so _first_contact_lookup is available for rewards
             # (e.g. wrist_smoothness_at_contact) even without sample_before_contact.
             self._derive_first_contact_from_motion_lib()
+            self._merge_reference_contact_boundaries()
+            self._build_first_contact_lookup()
             return
 
         # Support both file and directory modes
@@ -2825,11 +4616,61 @@ class TrackingCommand(CommandTerm):
         # Validate and align contact data frame counts to match motion data
         self._validate_and_align_contact_frame_counts(filtered_contact_data)
 
+        self._merge_reference_contact_boundaries()
+
         # Build motion_key -> first_contact_frame lookup tensor for efficient per-env updates
         self._build_first_contact_lookup()
 
         # Preprocess contact flags for each motion: motion_id -> (num_frames,) bool tensor
         self._build_motion_contact_flags()
+
+    def _merge_reference_contact_boundaries(self):
+        """Merge opt-in hand-or-body reset boundaries into first-contact timing.
+
+        This affects reset sampling and temporary reset stabilization only. It
+        does not replace per-hand contact labels used by grasp rewards.
+        """
+        path = getattr(self.cfg, "reference_contact_boundary_file", None)
+        if path is None:
+            return
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Reference contact boundary file not found: {path}")
+        with open(path) as boundary_file:
+            payload = json.load(boundary_file)
+        target_fps = float(payload.get("target_fps", self.motion_lib._sim_fps))  # noqa: SLF001
+        runtime_fps = float(self.motion_lib._sim_fps)  # noqa: SLF001
+        if abs(target_fps - runtime_fps) > 1.0e-6:
+            raise ValueError(
+                "Reference contact boundary target_fps does not match motion lib: "
+                f"{target_fps} vs {runtime_fps}"
+            )
+        boundaries = payload.get("motions", {})
+        if not isinstance(boundaries, dict):
+            raise TypeError("Reference contact boundary payload must contain a motions dict")
+        if self._first_contact_frame is None:
+            self._first_contact_frame = {}
+        merged = 0
+        body_advanced = 0
+        for motion_key in self.motion_lib.curr_motion_keys:
+            value = boundaries.get(motion_key)
+            if value is None:
+                continue
+            boundary = value.get("first_any_contact_frame") if isinstance(value, dict) else value
+            if boundary is None:
+                continue
+            boundary = int(boundary)
+            if boundary < 0:
+                raise ValueError(f"Negative contact boundary for {motion_key}: {boundary}")
+            previous = self._first_contact_frame.get(motion_key)
+            if previous is None or boundary < int(previous):
+                self._first_contact_frame[motion_key] = boundary
+                body_advanced += int(previous is not None)
+            merged += 1
+        print(  # noqa: T201
+            f"[TrackingCommand] Merged any-body reset contact boundaries for "
+            f"{merged}/{len(self.motion_lib.curr_motion_keys)} motions "
+            f"({body_advanced} earlier than hand-only contact)"
+        )
 
     def _build_first_contact_lookup(self):
         """Build a tensor for efficient per-env first contact frame lookup."""
@@ -2845,7 +4686,19 @@ class TrackingCommand(CommandTerm):
             if motion_key in self._first_contact_frame:
                 self._first_contact_lookup[motion_idx] = self._first_contact_frame[motion_key]
             else:
-                # Fallback to 0 if not found
+                if (
+                    getattr(
+                        self.cfg,
+                        "first_contact_reference_source",
+                        "legacy",
+                    )
+                    == "canonical_active_entity_required"
+                ):
+                    raise KeyError(
+                        f"Canonical first-contact timing is missing exact motion "
+                        f"key {motion_key!r}"
+                    )
+                # Legacy fallback retained for historical configurations.
                 self._first_contact_lookup[motion_idx] = 0
 
     def _build_motion_contact_flags(self):
@@ -2997,16 +4850,53 @@ class TrackingCommand(CommandTerm):
 
         Called from _load_contact_data() when no separate contact_file is provided.
         """
+        first_contact_source = str(
+            getattr(self.cfg, "first_contact_reference_source", "legacy")
+        )
+        if first_contact_source == "canonical_active_entity_required":
+            reference = getattr(
+                self.motion_lib,
+                "_motion_reference_contact_state",
+                None,
+            )
+            if reference is None:
+                raise RuntimeError(
+                    "Canonical first-contact reset timing requires "
+                    "reference_contact_state for every motion"
+                )
+            self._first_contact_frame = (
+                _first_required_canonical_contact_by_motion(
+                    reference,
+                    self.motion_lib.length_starts,
+                    self.motion_lib.curr_motion_keys,
+                )
+            )
+            print(  # noqa: T201
+                "[TrackingCommand] Derived first contact from canonical "
+                "active-entity required labels "
+                f"({len(self._first_contact_frame)} motions)"
+            )
+            return
+        if first_contact_source != "legacy":
+            raise ValueError(
+                "Unsupported first_contact_reference_source "
+                f"{first_contact_source!r}"
+            )
+
         contact_left = getattr(self.motion_lib, "_motion_object_in_contact_left", None)
         contact_right = getattr(self.motion_lib, "_motion_object_in_contact_right", None)
 
         if contact_left is None and contact_right is None:
-            if self.cfg.sample_before_contact:
+            if self.cfg.sample_before_contact and not getattr(
+                self.cfg, "reference_contact_boundary_file", None
+            ):
                 raise RuntimeError(
                     "sample_before_contact=True but no contact data available. "
                     "The object motions pkl must contain contact_points_left_hand "
-                    "or contact_points_right_hand, or provide a contact_file path."
+                    "or contact_points_right_hand, or provide a contact_file or "
+                    "reference_contact_boundary_file path."
                 )
+            self._first_contact_frame = {}
             return
 
         hands_used = []
@@ -3067,7 +4957,8 @@ class TrackingCommand(CommandTerm):
             if motion_idx + 1 < num_motions:
                 end = int(self.motion_lib.length_starts[motion_idx + 1])
             else:
-                end = len(per_hand[hands_used[0]])
+                contact_tensor = contact_left if contact_left is not None else contact_right
+                end = len(contact_tensor)
             num_frames = end - start
             print(f"  {motion_key[:60]}: first_contact={fc_frame}/{num_frames} frames")  # noqa: T201
 
@@ -3084,24 +4975,343 @@ class TrackingCommand(CommandTerm):
         # Build lookup tensor and contact flags (same as _load_contact_data)
         self._build_first_contact_lookup()
 
+    def _load_reset_start_cache(self) -> None:
+        """Load optional per-motion reset ranges in runtime-frame coordinates."""
+        self._reset_start_cache = None
+        self._reset_start_range_table = None
+        path = getattr(self.cfg, "reset_start_cache_file", None)
+        if not path:
+            return
+
+        target_fps = float(self.motion_lib._sim_fps)  # noqa: SLF001
+        required_level = str(
+            getattr(self.cfg, "reset_start_cache_required_validation", "reference")
+        )
+        require_all = bool(getattr(self.cfg, "reset_start_cache_require_all", False))
+        cache = load_reset_start_cache(
+            path,
+            motion_keys=self.motion_lib.curr_motion_keys,
+            target_fps=target_fps,
+            required_validation_level=required_level,
+            require_all=require_all,
+        )
+
+        truncate_time = self.cfg.sample_start_truncate_time_s
+        runtime_window = (
+            None
+            if truncate_time is None
+            else int(round(float(truncate_time) * target_fps))
+        )
+        if cache.episode_window_frames != runtime_window:
+            raise ValueError(
+                "Reset-start cache episode window does not match runtime: "
+                f"{cache.episode_window_frames} vs {runtime_window} frames"
+            )
+
+        num_motions = len(self.motion_lib.curr_motion_keys)
+        motion_ids = torch.arange(num_motions, device=self.device, dtype=torch.long)
+        runtime_steps = self.motion_lib.get_motion_num_steps(motion_ids)
+        if runtime_window is None:
+            valid_upper = runtime_steps
+        else:
+            valid_seconds = torch.clamp(
+                self.motion_lib.get_motion_length(motion_ids) - float(truncate_time),
+                min=0.0,
+            )
+            valid_upper = torch.ceil(valid_seconds * target_fps).long().clamp_min(1)
+
+        max_ranges = max(
+            (len(record.start_ranges) for record in cache.records if record is not None),
+            default=0,
+        )
+        table = torch.full(
+            (num_motions, max(max_ranges, 1), 2),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        loaded = 0
+        for motion_idx, record in enumerate(cache.records):
+            if record is None:
+                continue
+            current_steps = int(runtime_steps[motion_idx].item())
+            if record.runtime_num_steps != current_steps:
+                raise ValueError(
+                    f"Reset-start cache is stale for {record.motion_key}: "
+                    f"runtime_num_steps={record.runtime_num_steps}, current={current_steps}"
+                )
+            upper = int(valid_upper[motion_idx].item())
+            if record.start_ranges[-1][1] > upper:
+                raise ValueError(
+                    f"Reset-start cache range for {record.motion_key} ends at "
+                    f"{record.start_ranges[-1][1]}, beyond valid upper bound {upper}"
+                )
+            for range_idx, (start, end) in enumerate(record.start_ranges):
+                table[motion_idx, range_idx] = torch.tensor(
+                    (start, end), dtype=torch.long, device=self.device
+                )
+            loaded += 1
+
+        self._reset_start_cache = cache
+        self._reset_start_range_table = table
+        print(  # noqa: T201
+            f"[TrackingCommand] Reset-start cache loaded for {loaded}/{num_motions} "
+            f"motions ({required_level} validation, {cache.path})"
+        )
+
+    def _sample_from_reset_start_cache(
+        self, env_ids: Sequence[int], sampled_times: torch.Tensor
+    ) -> torch.Tensor:
+        """Replace fallback samples with a uniform draw over cached valid frames."""
+        table = self._reset_start_range_table
+        if table is None or len(env_ids) == 0:
+            return sampled_times
+        if self.is_evaluating and not bool(
+            getattr(self.cfg, "reset_start_cache_apply_in_evaluation", True)
+        ):
+            return sampled_times
+
+        env_ids_t = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        ranges = table[self.motion_ids[env_ids_t]]
+        lengths = (ranges[..., 1] - ranges[..., 0]).clamp_min(0)
+        total = lengths.sum(dim=1)
+        has_range = total > 0
+        if bool(getattr(self.cfg, "reset_start_cache_require_all", False)) and not bool(
+            has_range.all()
+        ):
+            missing_ids = self.motion_ids[env_ids_t[~has_range]].detach().cpu().tolist()
+            missing_keys = [self.motion_lib.curr_motion_keys[idx] for idx in missing_ids[:8]]
+            raise RuntimeError(
+                f"Reset-start cache has no qualified range for {len(missing_ids)} "
+                f"assigned environments; first={missing_keys}"
+            )
+        if not bool(has_range.any()):
+            return sampled_times
+
+        draw = torch.floor(torch.rand(len(env_ids_t), device=self.device) * total.clamp_min(1)).long()
+        cumulative = lengths.cumsum(dim=1)
+        range_index = (draw[:, None] >= cumulative).sum(dim=1).clamp_max(ranges.shape[1] - 1)
+        previous = torch.where(
+            range_index > 0,
+            cumulative.gather(1, (range_index - 1).clamp_min(0)[:, None]).squeeze(1),
+            torch.zeros_like(draw),
+        )
+        selected_start = ranges[..., 0].gather(1, range_index[:, None]).squeeze(1)
+        cached_times = selected_start + draw - previous
+        return torch.where(has_range, cached_times.to(sampled_times.dtype), sampled_times)
+
+    def _valid_start_upper_bounds(self, env_ids: Sequence[int]) -> torch.Tensor:
+        """Return exclusive upper bounds for valid episode start steps."""
+        motion_ids = self.motion_ids[env_ids]
+        truncate_time = self.cfg.sample_start_truncate_time_s
+        if truncate_time is None:
+            upper = self.motion_lib.get_motion_num_steps(motion_ids)
+        else:
+            valid_seconds = torch.clamp(
+                self.motion_lib.get_motion_length(motion_ids) - float(truncate_time),
+                min=0.0,
+            )
+            upper = torch.ceil(
+                valid_seconds * float(self.motion_lib._sim_fps)  # noqa: SLF001
+            ).long()
+        return upper.clamp_min(1)
+
+    def _enforce_valid_start_window(
+        self, env_ids: Sequence[int], sampled_times: torch.Tensor
+    ) -> torch.Tensor:
+        """Resample starts outside the configured full-episode window."""
+        if self.cfg.sample_start_truncate_time_s is None:
+            return sampled_times
+        valid_upper = self._valid_start_upper_bounds(env_ids)
+        invalid = (sampled_times < 0) | (sampled_times >= valid_upper)
+        if torch.any(invalid):
+            replacement = torch.floor(
+                torch.rand(len(env_ids), device=self.device) * valid_upper.float()
+            ).to(sampled_times.dtype)
+            sampled_times = torch.where(invalid, replacement, sampled_times)
+        return sampled_times
+
+    def _load_ownership_phase_table(self) -> None:
+        """Load per-motion ownership phases into a padded device tensor.
+
+        Reads rp2_ownership_phases from <ownership_meta_dir>/<motion>.pkl for
+        every loaded motion. Motions without phases get zero rows and sample
+        unconstrained (full-motion episodes), preserving behavior for
+        single-actor data.
+        """
+        import joblib  # noqa: PLC0415
+
+        keys = list(self.motion_lib.curr_motion_keys)
+        min_len = int(self.cfg.ownership_min_episode_frames)
+        per_motion: list[list[tuple[int, int]]] = []
+        found = 0
+        for key in keys:
+            phases: list[tuple[int, int]] = []
+            meta_path = os.path.join(self.cfg.ownership_meta_dir, f"{key}.pkl")
+            if os.path.isfile(meta_path):
+                try:
+                    payload = joblib.load(meta_path)
+                    meta = payload.get(key, payload) if isinstance(payload, dict) else {}
+                    raw = meta.get("rp2_ownership_phases") or []
+                    phases = [
+                        (int(s), int(e)) for s, e in raw if int(e) - int(s) >= min_len
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    print(  # noqa: T201
+                        f"[TrackingCommand] ownership meta unreadable for {key}: {exc}"
+                    )
+            if phases:
+                found += 1
+            per_motion.append(phases)
+        max_phases = max((len(p) for p in per_motion), default=0)
+        table = torch.full(
+            (len(keys), max(max_phases, 1), 2), -1, dtype=torch.long, device=self.device
+        )
+        for m, phases in enumerate(per_motion):
+            for j, (s, e) in enumerate(phases):
+                table[m, j, 0] = s
+                table[m, j, 1] = e
+        self._ownership_phase_table = table
+        print(  # noqa: T201
+            f"[TrackingCommand] ownership phases loaded for {found}/{len(keys)} motions "
+            f"(max {max_phases} phases; min episode {min_len} frames)"
+        )
+
+    def _constrain_to_ownership_phase(
+        self, env_ids: Sequence[int], sampled_times: torch.Tensor
+    ) -> torch.Tensor:
+        """Snap sampled starts into one ownership phase and record its end.
+
+        Envs whose motion has no phases keep their sample and a phase end of
+        -1 (no clamp). Phase choice is uniform over valid phases; the start is
+        uniform within [start, end - min_episode_frames].
+        """
+        if not getattr(self.cfg, "ownership_phase_episodes", False):
+            return sampled_times
+        if getattr(self, "_ownership_phase_table", None) is None:
+            self._load_ownership_phase_table()
+        if not hasattr(self, "_ownership_phase_end"):
+            self._ownership_phase_end = torch.full(
+                (self.num_envs,), -1, dtype=torch.long, device=self.device
+            )
+        min_len = int(self.cfg.ownership_min_episode_frames)
+        table = self._ownership_phase_table
+        env_ids_t = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        motions = self.motion_ids[env_ids_t]
+        phases = table[motions]  # (E, K, 2)
+        valid = (phases[..., 0] >= 0) & ((phases[..., 1] - phases[..., 0]) >= min_len)
+        has_phase = valid.any(dim=1)
+        self._ownership_phase_end[env_ids_t] = -1
+        if not bool(has_phase.any()):
+            return sampled_times
+        # Uniform choice among valid phases per env.
+        weights = valid.float() + 1e-9
+        choice = torch.multinomial(weights, 1).squeeze(1)
+        sel = phases[torch.arange(len(env_ids_t), device=self.device), choice]
+        span = (sel[:, 1] - sel[:, 0] - min_len).clamp(min=1)
+        starts = sel[:, 0] + (
+            torch.rand(len(env_ids_t), device=self.device) * span.float()
+        ).long()
+        sampled_times = torch.where(has_phase, starts.to(sampled_times.dtype), sampled_times)
+        self._ownership_phase_end[env_ids_t] = torch.where(
+            has_phase, sel[:, 1], torch.full_like(sel[:, 1], -1)
+        )
+        return sampled_times
+
+    def _apply_ownership_phase_end(self, env_ids: Sequence[int]) -> None:
+        """Clamp episode length so it ends at the chosen phase's end."""
+        if not getattr(self.cfg, "ownership_phase_episodes", False):
+            return
+        if not hasattr(self, "_ownership_phase_end"):
+            return
+        env_ids_t = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        num_steps = self.motion_num_steps[env_ids_t]
+        phase_end = self._ownership_phase_end[env_ids_t].to(num_steps.dtype)
+        clamped = torch.where(
+            phase_end > 0,
+            torch.minimum(num_steps, phase_end),
+            num_steps,
+        )
+        self.motion_num_steps[env_ids_t] = clamped.to(self.motion_num_steps.dtype)
+
+    def _sample_before_contact_legacy_mode(self) -> bool:
+        """Legacy pre-contact window (default) vs the ContactFirst windowed mixture."""
+        return (
+            str(getattr(self.cfg, "sample_before_contact_window_mode", "legacy") or "legacy")
+            == "legacy"
+        )
+
     def _sample_before_contact(
         self, env_ids: Sequence[int], sampled_times: torch.Tensor
     ) -> torch.Tensor:
-        """Sample timestamps before the first contact frame for contact-based initialization.
+        """Bias a configurable fraction of valid reset starts toward pre-contact frames.
 
         Args:
             env_ids: Environment indices to resample
             sampled_times: Originally sampled time steps
 
         Returns:
-            Modified sampled_times with timestamps clamped to before first contact
+            Valid full-window samples with a configurable pre-contact bias.
         """
         if self._first_contact_frame is None or len(self._first_contact_frame) == 0:
             return sampled_times
+        if self._sample_before_contact_legacy_mode():
+            # Legacy window (released task-general tracking): override every start
+            # with a uniform sample from [0, first_contact - margin).
+            curr_motion_keys = getattr(self.motion_lib, "curr_motion_keys", None)
+            for i, env_idx in enumerate(env_ids):
+                motion_id = self.motion_ids[env_idx].item()
+                if curr_motion_keys is not None and motion_id < len(curr_motion_keys):
+                    motion_key = curr_motion_keys[motion_id]
+                else:
+                    motion_key = list(self._first_contact_frame.keys())[0]  # noqa: RUF015
+                first_contact = None
+                if motion_key in self._first_contact_frame:
+                    first_contact = self._first_contact_frame[motion_key]
+                else:
+                    for contact_key in self._first_contact_frame.keys():  # noqa: SIM118
+                        if contact_key in motion_key or motion_key in contact_key:
+                            first_contact = self._first_contact_frame[contact_key]
+                            break
+                    if first_contact is None:
+                        first_contact = list(self._first_contact_frame.values())[0]  # noqa: RUF015
+                margin = getattr(self.cfg, "sample_before_contact_margin", 10)
+                if first_contact > margin:
+                    sampled_times[i] = torch.randint(
+                        0, first_contact - margin, (1,), device=self.device, dtype=sampled_times.dtype
+                    )
+                else:
+                    sampled_times[i] = 0
+            return sampled_times
+        bias_probability = float(
+            getattr(self.cfg, "sample_before_contact_bias_probability", 1.0)
+        )
+        bias_probability = min(max(bias_probability, 0.0), 1.0)
+        if bias_probability <= 0.0:
+            return sampled_times
+        biased = torch.rand(len(env_ids), device=self.device) < bias_probability
+
+        truncate_time = self.cfg.sample_start_truncate_time_s
+        motion_num_steps = self.motion_lib.get_motion_num_steps(self.motion_ids[env_ids])
+        valid_upper = self._valid_start_upper_bounds(env_ids)
+        if truncate_time is None:
+            episode_window_steps = None
+        else:
+            episode_window_steps = max(
+                int(
+                    round(
+                        float(truncate_time)
+                        * float(self.motion_lib._sim_fps)  # noqa: SLF001
+                    )
+                ),
+                1,
+            )
         # Get motion keys from motion library
         curr_motion_keys = getattr(self.motion_lib, "curr_motion_keys", None)
 
         for i, env_idx in enumerate(env_ids):
+            if not bool(biased[i]):
+                continue
             motion_id = self.motion_ids[env_idx].item()
 
             # Get motion key for this motion_id
@@ -3110,10 +5320,20 @@ class TrackingCommand(CommandTerm):
             else:
                 # Fallback: use first contact key
                 motion_key = list(self._first_contact_frame.keys())[0]  # noqa: RUF015
-            first_contact = None
-            if motion_key in self._first_contact_frame:
-                first_contact = self._first_contact_frame[motion_key]
-            else:
+            first_contact = self._first_contact_frame.get(motion_key)
+            if first_contact is None:
+                if (
+                    getattr(
+                        self.cfg,
+                        "first_contact_reference_source",
+                        "legacy",
+                    )
+                    == "canonical_active_entity_required"
+                ):
+                    raise KeyError(
+                        f"Canonical first-contact timing is missing exact motion "
+                        f"key {motion_key!r}"
+                    )
                 for contact_key in self._first_contact_frame.keys():  # noqa: SIM118
                     if contact_key in motion_key or motion_key in contact_key:
                         first_contact = self._first_contact_frame[contact_key]
@@ -3121,14 +5341,71 @@ class TrackingCommand(CommandTerm):
                 if first_contact is None:
                     first_contact = list(self._first_contact_frame.values())[0]  # noqa: RUF015
 
-            # Sample uniformly from [0, first_contact - margin)
-            margin = getattr(self.cfg, "sample_before_contact_margin", 10)
-            if first_contact > margin:
-                sampled_times[i] = torch.randint(
-                    0, first_contact - margin, (1,), device=self.device, dtype=sampled_times.dtype
-                )
+            # A sentinel at or beyond the motion end means that this motion has
+            # no labeled contact. Keep its original uniform sample.
+            if int(first_contact) >= int(motion_num_steps[i].item()):
+                continue
+
+            # Redraw only from starts for which contact occurs inside the
+            # episode, with at least `margin` reference steps of lead-in. This
+            # remains a mixture with the untouched uniform sample above, so the
+            # complete valid interval retains nonzero probability.
+            margin_seconds = getattr(
+                self.cfg, "sample_before_contact_margin_seconds", None
+            )
+            if margin_seconds is None:
+                margin = int(getattr(self.cfg, "sample_before_contact_margin", 10))
             else:
-                sampled_times[i] = 0
+                margin = duration_seconds_to_frames(
+                    float(margin_seconds),
+                    float(self.motion_lib._sim_fps),  # noqa: SLF001
+                )
+            contact_step = int(first_contact)
+            lower = 0
+            if episode_window_steps is not None:
+                lower = max(contact_step - episode_window_steps, 0)
+            upper = min(
+                contact_step - int(margin) + 1,
+                int(valid_upper[i].item()),
+            )
+            if upper <= lower:
+                continue
+
+            # When a validated reset cache is active, sample only from the
+            # intersection of its ranges and the pre-contact interval. The
+            # cache is otherwise applied after contact bias and would silently
+            # erase the configured mixture.
+            if self._reset_start_range_table is not None:
+                ranges = self._reset_start_range_table[motion_id]
+                starts = torch.maximum(
+                    ranges[:, 0],
+                    torch.full_like(ranges[:, 0], lower),
+                )
+                ends = torch.minimum(
+                    ranges[:, 1],
+                    torch.full_like(ranges[:, 1], upper),
+                )
+                lengths = (ends - starts).clamp_min(0)
+                total = int(lengths.sum().item())
+                if total <= 0:
+                    continue
+                draw = torch.randint(0, total, (1,), device=self.device)
+                cumulative = lengths.cumsum(dim=0)
+                range_index = int((draw >= cumulative).sum().item())
+                previous = (
+                    int(cumulative[range_index - 1].item())
+                    if range_index > 0
+                    else 0
+                )
+                sampled_times[i] = starts[range_index] + draw[0] - previous
+            else:
+                sampled_times[i] = torch.randint(
+                    lower,
+                    upper,
+                    (1,),
+                    device=self.device,
+                    dtype=sampled_times.dtype,
+                )
 
         return sampled_times
 
@@ -3136,9 +5413,21 @@ class TrackingCommand(CommandTerm):
         self, env_ids: Sequence[int]
     ) -> torch.Tensor:
         """Sample reset start times for the already-assigned motion IDs."""
-        sampled_times = self.motion_lib.sample_time_steps(
-            self.motion_ids[env_ids], truncate_time=None
+        adaptive_paired_starts = self.use_adaptive_sampling and bool(
+            self.motion_lib.adaptive_sampling_cfg.get(
+                "paired_motion_time_sampling", False
+            )
         )
+        if adaptive_paired_starts:
+            sampled_times = self.motion_lib.sample_time_steps_for_motion_ids_adaptive(
+                self.motion_ids[env_ids],
+                truncate_time=self.cfg.sample_start_truncate_time_s,
+            )
+        else:
+            sampled_times = self.motion_lib.sample_time_steps(
+                self.motion_ids[env_ids],
+                truncate_time=self.cfg.sample_start_truncate_time_s,
+            )
 
         if self.cfg.sample_from_n_initial_frames is not None:
             n_frames = self.cfg.sample_from_n_initial_frames
@@ -3148,10 +5437,43 @@ class TrackingCommand(CommandTerm):
         elif self.cfg.start_from_first_frame:
             sampled_times.zero_()
 
-        if self.cfg.sample_before_contact and self._first_contact_frame is not None:
-            sampled_times = self._sample_before_contact(env_ids, sampled_times)
+        sampled_times = self._enforce_valid_start_window(env_ids, sampled_times)
+        sampled_times = self._constrain_to_ownership_phase(env_ids, sampled_times)
 
         return sampled_times
+
+    def _sample_asset_compatible_motion_ids(
+        self,
+        env_ids: Sequence[int],
+        *,
+        evaluation: bool,
+    ) -> torch.Tensor:
+        """Sample motions that use each environment's immutable USD assets."""
+        env_ids_t = (
+            env_ids
+            if isinstance(env_ids, torch.Tensor)
+            else torch.tensor(env_ids, dtype=torch.long, device=self.device)
+        )
+        env_ids_t = env_ids_t.to(device=self.device, dtype=torch.long)
+        if evaluation:
+            return self._asset_compatible_representative_motion_ids[env_ids_t]
+
+        sampled = torch.empty(
+            len(env_ids_t),
+            dtype=torch.long,
+            device=self.device,
+        )
+        group_ids = self._asset_compatible_env_group_ids[env_ids_t]
+        for group_id in group_ids.unique():
+            assignment = group_ids == group_id
+            candidates = self._asset_compatible_motion_groups[
+                int(group_id.item())
+            ]
+            sampled[assignment] = self.motion_lib.sample_motions_from_candidates(
+                candidates,
+                int(assignment.sum().item()),
+            )
+        return sampled
 
     def _resample_command(self, env_ids: Sequence[int]):
         """Resample motion clips, reset robot state, and position objects for given envs.
@@ -3170,13 +5492,28 @@ class TrackingCommand(CommandTerm):
         Args:
             env_ids: Environment indices being reset.
         """
+        if getattr(self, "_adaptive_terminal_only", False) and len(env_ids) > 0:
+            # Pre-reset attribution: capture the finished episode before the
+            # buffers below are overwritten with the next one.
+            self._snapshot_completed_episodes(env_ids)
         self.time_steps[env_ids] = 0
         # Variable frames: resample per-env num_frames at episode reset
         if self.variable_frames_enabled and len(env_ids) > 0:
             idx = torch.randint(0, len(self._frame_choices), (len(env_ids),), device=self.device)
             self.per_env_num_frames[env_ids] = self._frame_choices[idx]
         if len(env_ids) > 0:
-            if self.is_evaluating and self._terrain_aware:
+            if self.use_asset_compatible_motions:
+                self.motion_ids[env_ids] = self._sample_asset_compatible_motion_ids(
+                    env_ids,
+                    evaluation=self.is_evaluating,
+                )
+                if self.is_evaluating:
+                    self.motion_start_time_steps[env_ids] = 0
+                else:
+                    self.motion_start_time_steps[env_ids] = (
+                        self._sample_start_time_steps_for_current_motions(env_ids)
+                    )
+            elif self.is_evaluating and self._terrain_aware:
                 # Eval + terrain-aware: respect flat/terrain split
                 env_ids_t = (
                     env_ids
@@ -3200,6 +5537,24 @@ class TrackingCommand(CommandTerm):
                     % self.motion_lib._num_motions  # noqa: SLF001
                 )[env_ids]
                 self.motion_start_time_steps[env_ids] = 0
+                if (
+                    self.cfg.evaluation_start_before_contact_frames is not None
+                    and self._first_contact_lookup is not None
+                ):
+                    first_contact = self._first_contact_lookup[self.motion_ids[env_ids]]
+                    motion_steps = self.motion_lib.get_time_step_total(
+                        self.motion_ids[env_ids]
+                    )
+                    has_contact = first_contact < motion_steps
+                    contact_centered_start = (
+                        first_contact
+                        - int(self.cfg.evaluation_start_before_contact_frames)
+                    ).clamp(min=0).to(self.motion_start_time_steps.dtype)
+                    self.motion_start_time_steps[env_ids] = torch.where(
+                        has_contact,
+                        contact_centered_start,
+                        self.motion_start_time_steps[env_ids],
+                    )
             elif self.cfg.use_paired_motions:
                 self.motion_ids[env_ids] = (
                     torch.arange(self.num_envs).to(self.device)
@@ -3214,7 +5569,8 @@ class TrackingCommand(CommandTerm):
                 new_motion_id = self.motion_lib.sample_motions(1)[0]
                 self.motion_ids[env_ids] = new_motion_id
                 self.motion_start_time_steps[env_ids] = self.motion_lib.sample_time_steps(
-                    self.motion_ids[env_ids], truncate_time=None
+                    self.motion_ids[env_ids],
+                    truncate_time=self.cfg.sample_start_truncate_time_s,
                 )
             elif self._terrain_aware:
                 # TERRAIN-AWARE SAMPLING: flat envs resample motions, terrain envs keep fixed motion
@@ -3241,7 +5597,8 @@ class TrackingCommand(CommandTerm):
                         )
                         self.motion_ids[flat_envs] = flat_ids
                         self.motion_start_time_steps[flat_envs] = self.motion_lib.sample_time_steps(
-                            self.motion_ids[flat_envs], truncate_time=None
+                            self.motion_ids[flat_envs],
+                            truncate_time=self.cfg.sample_start_truncate_time_s,
                         )
                     else:
                         if self.use_adaptive_sampling:
@@ -3258,18 +5615,22 @@ class TrackingCommand(CommandTerm):
                             )
                             self.motion_start_time_steps[flat_envs] = (
                                 self.motion_lib.sample_time_steps(
-                                    self.motion_ids[flat_envs], truncate_time=None
+                                    self.motion_ids[flat_envs],
+                                    truncate_time=self.cfg.sample_start_truncate_time_s,
                                 )
                             )
 
                 # Terrain envs: keep motion_id fixed, only resample start time
                 if len(terrain_envs) > 0:
                     self.motion_start_time_steps[terrain_envs] = self.motion_lib.sample_time_steps(
-                        self.motion_ids[terrain_envs], truncate_time=None
+                        self.motion_ids[terrain_envs],
+                        truncate_time=self.cfg.sample_start_truncate_time_s,
                     )
 
                 # Build combined sampled_times for downstream overrides
                 sampled_times = self.motion_start_time_steps[env_ids_t].clone()
+                sampled_times = self._enforce_valid_start_window(env_ids_t, sampled_times)
+                self.motion_start_time_steps[env_ids_t] = sampled_times
             else:
                 if self.use_adaptive_sampling:
                     sampled_ids, sampled_times = self.motion_lib.sample_motion_ids_and_time_steps(
@@ -3280,7 +5641,8 @@ class TrackingCommand(CommandTerm):
                 else:
                     self.motion_ids[env_ids] = self.motion_lib.sample_motions(len(env_ids))
                     sampled_times = self.motion_lib.sample_time_steps(
-                        self.motion_ids[env_ids], truncate_time=None
+                        self.motion_ids[env_ids],
+                        truncate_time=self.cfg.sample_start_truncate_time_s,
                     )
 
                 # Override to sample from initial frames if configured
@@ -3293,11 +5655,23 @@ class TrackingCommand(CommandTerm):
                 elif self.cfg.start_from_first_frame:
                     sampled_times.zero_()
 
-                # Contact-based initialization: sample timestamps before first contact frame
-                if self.cfg.sample_before_contact and self._first_contact_frame is not None:
-                    sampled_times = self._sample_before_contact(env_ids, sampled_times)
-
+                sampled_times = self._enforce_valid_start_window(env_ids, sampled_times)
                 self.motion_start_time_steps[env_ids] = sampled_times
+
+            # Apply the same cache contract after every reset branch. This is
+            # intentionally last: cached ranges supersede legacy uniform,
+            # contact-biased, terrain, adaptive, and evaluation start choices.
+            self.motion_start_time_steps[env_ids] = self._sample_from_reset_start_cache(
+                env_ids, self.motion_start_time_steps[env_ids]
+            )
+            if (
+                self.cfg.sample_before_contact
+                and self._first_contact_frame is not None
+                and not self.is_evaluating
+            ):
+                self.motion_start_time_steps[env_ids] = self._sample_before_contact(
+                    env_ids, self.motion_start_time_steps[env_ids]
+                )
 
             if self.encoder_sample_probs is not None:
                 has_smpl = self.motion_lib.motion_has_smpl[self.motion_ids[env_ids]]
@@ -3384,6 +5758,10 @@ class TrackingCommand(CommandTerm):
                     self.motion_ids[env_ids]
                 )
 
+            self._refresh_object_metadata_cache(env_ids)
+            self._apply_target_object_mass_overrides(env_ids)
+            self._refresh_joint_roster_runtime_mass_metric(env_ids)
+
             # Update per-env first contact frame based on assigned motion
             if self._first_contact_frame is not None:
                 self._update_per_env_first_contact(env_ids)
@@ -3440,7 +5818,20 @@ class TrackingCommand(CommandTerm):
             )
             joint_pos[:, self.body_joint_indices] = motion_lib_joint_pos
             joint_vel[:, self.body_joint_indices] = motion_lib_joint_vel
-            joint_pos[:, self.extra_joint_indices] = self.extra_default_positions
+            # Extra (hand) joints: exact reference dof (name-mapped) if configured+available,
+            # else the zero/default hand pose.
+            ref_hand_dof = None
+            if getattr(self, "reference_hand_dof_indices", None) is not None:
+                # all-env fetch (num_envs, 14) to match joint_pos[:, ...]; only env_ids rows
+                # are applied downstream, same as the body block above.
+                ref_hand_dof = self.motion_lib.get_hand_dof_pos(
+                    self.motion_ids,
+                    self.motion_start_time_steps + self.time_steps,
+                )
+            if ref_hand_dof is not None:
+                joint_pos[:, self.reference_hand_dof_indices] = ref_hand_dof.to(joint_pos.dtype)
+            else:
+                joint_pos[:, self.extra_joint_indices] = self.extra_default_positions
             joint_vel[:, self.extra_joint_indices] = self.extra_default_velocities
 
             if not self.is_evaluating:
@@ -3484,6 +5875,19 @@ class TrackingCommand(CommandTerm):
                 *self.cfg.joint_velocity_range, joint_vel.shape, joint_vel.device
             )
 
+        if self.cfg.source_only_reset:
+            from gear_sonic.envs.manager_env.mdp.rp2_source_relation import (  # noqa: PLC0415
+                build_source_only_reset_state,
+            )
+
+            source_state = build_source_only_reset_state(self, env_ids)
+            root_pos[env_ids] = source_state["root_pos"]
+            root_ori[env_ids] = source_state["root_quat"]
+            root_lin_vel[env_ids] = source_state["root_lin_vel"]
+            root_ang_vel[env_ids] = source_state["root_ang_vel"]
+            joint_pos[env_ids] = source_state["joint_pos"]
+            joint_vel[env_ids] = source_state["joint_vel"]
+
         soft_joint_pos_limits = self.robot.data.soft_joint_pos_limits[env_ids]
         joint_pos[env_ids] = torch.clip(
             joint_pos[env_ids], soft_joint_pos_limits[:, :, 0], soft_joint_pos_limits[:, :, 1]
@@ -3503,71 +5907,322 @@ class TrackingCommand(CommandTerm):
             ),
             env_ids=env_ids,
         )
-        # Handle object positioning
-        if self._multi_object_mode and len(self._object_names) > 0:
-            # MULTI-OBJECT MODE: Position active object, move others far away
-            # Get active object name from motion key (original name with hyphens)
-            active_motion_id = self.motion_ids[env_ids[0]].item() if len(env_ids) > 0 else 0
-            active_motion_key = self.motion_lib.curr_motion_keys[active_motion_id]
-            # Convert motion key to safe name (hyphens → underscores) for scene lookup
-            active_obj_safe_name = active_motion_key.replace("-", "_")
-            self._active_object_name = active_motion_key
-
-            # Position the active object from motion trajectory
-            active_key = f"object_{active_obj_safe_name}"
-            if active_key in self._env.scene.rigid_objects:
-                obj = self._env.scene[active_key]
-                obj_pos = self._get_object_pos_with_offset(env_ids)
-                # Reset with zero velocity to prevent velocity carryover between episodes
-                zero_vel = torch.zeros(len(env_ids), 6, device=self.device)
-                obj.write_root_state_to_sim(
-                    torch.cat(
-                        [obj_pos, self.object_root_quat[env_ids, 0], zero_vel],
-                        dim=-1,
-                    ),
-                    env_ids=env_ids,
-                )
-            else:
-                print(  # noqa: T201
-                    f"[Warning] Active object '{active_key}' not found in scene. Available: {list(self._env.scene.rigid_objects.keys())[:5]}..."  # noqa: E501
-                )
-
-            # Move all other objects to inactive positions (far away from robot)
-            # Spread objects vertically (Z-axis) - envs naturally separate in X,Y via env_origins
-            inactive_base = INACTIVE_OBJECT_BASE_OFFSET.to(self.device)
-            inactive_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(
-                len(env_ids), -1
+        # Handle object positioning. Active articulation is an opt-in, mutually
+        # exclusive replacement for the legacy rigid active object.
+        active_articulations = getattr(self._env.scene, "articulations", {})
+        if "active_articulation" in active_articulations:
+            required_channels = (
+                "_motion_active_articulation_root_pos",
+                "_motion_active_articulation_root_quat",
+                "_motion_active_articulation_root_lin_vel",
+                "_motion_active_articulation_root_ang_vel",
+                "_motion_active_articulation_joint_pos",
+                "_motion_active_articulation_joint_vel",
             )
+            missing_channels = [
+                name for name in required_channels if not hasattr(self.motion_lib, name)
+            ]
+            if missing_channels:
+                raise ValueError(
+                    "Active articulation scene requires reference channels in the object "
+                    f"motion data; missing={missing_channels}"
+                )
 
-            inactive_idx = 0
-            for safe_name in self._object_names:
-                obj_key = f"object_{safe_name}"
-                if obj_key != active_key and obj_key in self._env.scene.rigid_objects:
-                    # Spread in Z: each object type at different depth underground
-                    # X,Y comes from env_origins → naturally separates different envs
-                    z_offset = torch.tensor(
-                        [0.0, 0.0, -inactive_idx * INACTIVE_OBJECT_Z_SPACING], device=self.device
+            articulation = active_articulations["active_articulation"]
+            root_state = torch.cat(
+                [
+                    self.active_articulation_root_pos[env_ids],
+                    self.active_articulation_root_quat[env_ids],
+                    self.active_articulation_root_lin_vel[env_ids],
+                    self.active_articulation_root_ang_vel[env_ids],
+                ],
+                dim=-1,
+            )
+            config = getattr(self._env.cfg, "config", {}) or {}
+            passive_reset = bool(
+                config.get("active_articulation_passive_static_reset", False)
+            )
+            static_mask = ~self.active_articulation_root_dynamic_mask[env_ids]
+            if passive_reset and torch.any(static_mask):
+                static_env_ids = env_ids[static_mask]
+                static_root_state = root_state[static_mask].clone()
+                static_root_state[:, 7:] = 0.0
+                root_state[static_mask] = static_root_state
+                if not hasattr(self, "_active_articulation_static_root_state"):
+                    self._active_articulation_static_root_state = torch.zeros(
+                        self.num_envs,
+                        13,
+                        dtype=root_state.dtype,
+                        device=self.device,
                     )
-                    inactive_pos = self._env.scene.env_origins[env_ids] + inactive_base + z_offset
-                    # Reset with zero velocity to prevent velocity carryover between episodes
-                    inactive_zero_vel = torch.zeros(len(env_ids), 6, device=self.device)
-                    inactive_state = torch.cat(
-                        [inactive_pos, inactive_quat, inactive_zero_vel], dim=-1
+                self._active_articulation_static_root_state[static_env_ids] = (
+                    static_root_state
+                )
+            articulation.write_root_state_to_sim(root_state, env_ids=env_ids)
+
+            joint_pos = self.active_articulation_joint_pos[env_ids]
+            joint_vel = self.active_articulation_joint_vel[env_ids]
+            reference_joint_names = list(
+                config.get("active_articulation_reference_joint_names", [])
+            )
+            if reference_joint_names:
+                missing_joints = [
+                    name for name in articulation.joint_names if name not in reference_joint_names
+                ]
+                if missing_joints:
+                    raise ValueError(
+                        "Articulation joints are absent from reference channel ordering: "
+                        f"missing={missing_joints}, reference={reference_joint_names}"
                     )
-                    self._env.scene[obj_key].write_root_state_to_sim(
-                        inactive_state, env_ids=env_ids
+                source_order = [
+                    reference_joint_names.index(name) for name in articulation.joint_names
+                ]
+                joint_pos = joint_pos[:, source_order]
+                joint_vel = joint_vel[:, source_order]
+            if joint_pos.shape[1] != articulation.num_joints:
+                raise ValueError(
+                    "Active articulation reference joint count does not match the USD: "
+                    f"reference={joint_pos.shape[1]}, usd={articulation.num_joints}, "
+                    f"names={list(articulation.joint_names)}"
+                )
+            soft_limits = articulation.data.soft_joint_pos_limits[env_ids]
+            joint_pos = torch.clamp(joint_pos, soft_limits[:, :, 0], soft_limits[:, :, 1])
+            if passive_reset and torch.any(static_mask):
+                joint_vel = joint_vel.clone()
+                joint_vel[static_mask] = 0.0
+                passive_joint_friction = float(
+                    config.get(
+                        "active_articulation_passive_joint_static_friction", 0.0
                     )
-                    inactive_idx += 1
+                )
+                passive_joint_dynamic_friction = float(
+                    config.get(
+                        "active_articulation_passive_joint_dynamic_friction", 0.0
+                    )
+                )
+                passive_joint_viscous_friction = float(
+                    config.get(
+                        "active_articulation_passive_joint_viscous_friction", 0.0
+                    )
+                )
+                passive_joint_damping = float(
+                    config.get("active_articulation_passive_joint_damping", 0.0)
+                )
+                passive_joint_values = {
+                    "static_friction": passive_joint_friction,
+                    "dynamic_friction": passive_joint_dynamic_friction,
+                    "viscous_friction": passive_joint_viscous_friction,
+                    "damping": passive_joint_damping,
+                }
+                invalid_passive_values = {
+                    name: value
+                    for name, value in passive_joint_values.items()
+                    if value < 0.0
+                }
+                if invalid_passive_values:
+                    raise ValueError(
+                        "Active-articulation passive joint parameters must be "
+                        f"non-negative: {invalid_passive_values}"
+                    )
+                if any(
+                    value > 0.0
+                    for value in (
+                        passive_joint_friction,
+                        passive_joint_dynamic_friction,
+                        passive_joint_viscous_friction,
+                    )
+                ):
+                    articulation.write_joint_friction_coefficient_to_sim(
+                        passive_joint_friction,
+                        joint_dynamic_friction_coeff=(
+                            passive_joint_dynamic_friction
+                        ),
+                        joint_viscous_friction_coeff=(
+                            passive_joint_viscous_friction
+                        ),
+                        env_ids=env_ids[static_mask],
+                    )
+                if passive_joint_damping > 0.0:
+                    articulation.write_joint_damping_to_sim(
+                        passive_joint_damping,
+                        env_ids=env_ids[static_mask],
+                    )
+            articulation.write_joint_state_to_sim(
+                joint_pos,
+                joint_vel,
+                env_ids=env_ids,
+            )
+        elif self._multi_object_mode and len(self._object_names) > 0:
+            if getattr(self.cfg, "full_scene_per_env", False):
+                audit_reset_index = self._next_object_audit_reset_index()
+                object_pos = self.object_root_pos[env_ids]
+                object_quat = self.object_root_quat[env_ids]
+                inactive_base = INACTIVE_OBJECT_BASE_OFFSET.to(self.device)
+                inactive_quat = torch.tensor(
+                    [[1.0, 0.0, 0.0, 0.0]], device=self.device
+                )
+                all_object_keys = [
+                    key for key in self._env.scene.rigid_objects if key.startswith("object_")
+                ]
+                motion_ids_for_envs = self.motion_ids[env_ids]
+                for motion_id in torch.unique(motion_ids_for_envs):
+                    group_mask = motion_ids_for_envs == motion_id
+                    group_env_ids = env_ids[group_mask]
+                    motion_id_int = int(motion_id.item())
+                    motion_key = self.motion_lib.curr_motion_keys[int(motion_id.item())]
+                    object_scene_keys = motion_order_object_scene_keys(
+                        self._env,
+                        max_objects=object_pos.shape[1],
+                        motion_key=motion_key,
+                    )
+                    zero_vel = torch.zeros(len(group_env_ids), 6, device=self.device)
+                    for obj_idx, obj_key in enumerate(object_scene_keys):
+                        if obj_idx >= object_pos.shape[1]:
+                            break
+                        obj_state = torch.cat(
+                            [
+                                object_pos[group_mask, obj_idx],
+                                object_quat[group_mask, obj_idx],
+                                zero_vel,
+                            ],
+                            dim=-1,
+                        )
+                        self._env.scene[obj_key].write_root_state_to_sim(
+                            obj_state,
+                            env_ids=group_env_ids,
+                        )
+
+                    inactive_zero_vel = torch.zeros(len(group_env_ids), 6, device=self.device)
+                    inactive_idx = 0
+                    for obj_key in all_object_keys:
+                        if obj_key in object_scene_keys:
+                            continue
+                        z_offset = torch.tensor(
+                            [0.0, 0.0, -inactive_idx * INACTIVE_OBJECT_Z_SPACING],
+                            device=self.device,
+                        )
+                        inactive_pos = (
+                            self._env.scene.env_origins[group_env_ids]
+                            + inactive_base
+                            + z_offset
+                        )
+                        inactive_state = torch.cat(
+                            [
+                                inactive_pos,
+                                inactive_quat.expand(len(group_env_ids), -1),
+                                inactive_zero_vel,
+                            ],
+                            dim=-1,
+                        )
+                        self._env.scene[obj_key].write_root_state_to_sim(
+                            inactive_state,
+                            env_ids=group_env_ids,
+                        )
+                        inactive_idx += 1
+                    if audit_reset_index is not None:
+                        self._append_full_scene_reset_audit(
+                            reset_index=audit_reset_index,
+                            motion_id=motion_id_int,
+                            motion_key=motion_key,
+                            env_ids=group_env_ids,
+                            object_scene_keys=object_scene_keys,
+                            all_object_keys=all_object_keys,
+                            object_pos=object_pos[group_mask],
+                            object_quat=object_quat[group_mask],
+                        )
+                if audit_reset_index is not None:
+                    self._write_object_audit()
+            else:
+                # MULTI-OBJECT MODE: Position active object, move others far away.
+                # Get active object name from motion key (original name with hyphens).
+                active_motion_id = self.motion_ids[env_ids[0]].item() if len(env_ids) > 0 else 0
+                active_motion_key = self.motion_lib.curr_motion_keys[active_motion_id]
+                active_obj_safe_name = active_motion_key.replace("-", "_")
+                self._active_object_name = active_motion_key
+
+                active_key = f"object_{active_obj_safe_name}"
+                if active_key in self._env.scene.rigid_objects:
+                    obj = self._env.scene[active_key]
+                    obj_pos = self._get_object_pos_with_offset(env_ids)
+                    zero_vel = torch.zeros(len(env_ids), 6, device=self.device)
+                    obj.write_root_state_to_sim(
+                        torch.cat(
+                            [obj_pos, self.object_root_quat[env_ids, 0], zero_vel],
+                            dim=-1,
+                        ),
+                        env_ids=env_ids,
+                    )
+                else:
+                    print(  # noqa: T201
+                        f"[Warning] Active object '{active_key}' not found in scene. Available: {list(self._env.scene.rigid_objects.keys())[:5]}..."  # noqa: E501
+                    )
+
+                inactive_base = INACTIVE_OBJECT_BASE_OFFSET.to(self.device)
+                inactive_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(
+                    len(env_ids), -1
+                )
+
+                inactive_idx = 0
+                for safe_name in self._object_names:
+                    obj_key = f"object_{safe_name}"
+                    if obj_key != active_key and obj_key in self._env.scene.rigid_objects:
+                        z_offset = torch.tensor(
+                            [0.0, 0.0, -inactive_idx * INACTIVE_OBJECT_Z_SPACING],
+                            device=self.device,
+                        )
+                        inactive_pos = (
+                            self._env.scene.env_origins[env_ids] + inactive_base + z_offset
+                        )
+                        inactive_zero_vel = torch.zeros(len(env_ids), 6, device=self.device)
+                        inactive_state = torch.cat(
+                            [inactive_pos, inactive_quat, inactive_zero_vel], dim=-1
+                        )
+                        self._env.scene[obj_key].write_root_state_to_sim(
+                            inactive_state, env_ids=env_ids
+                        )
+                        inactive_idx += 1
         elif "object" in self._env.scene.rigid_objects:
             # SINGLE OBJECT MODE: Existing behavior
             obj = self._env.scene["object"]
             obj_pos = self._get_object_pos_with_offset(env_ids)
-            # Reset with zero velocity to prevent velocity carryover between episodes
-            zero_vel = torch.zeros(len(env_ids), 6, device=self.device)
+            if self.cfg.object_reset_use_reference_velocity:
+                object_vel = torch.cat(
+                    (
+                        self.object_root_lin_vel[env_ids, 0],
+                        self.object_root_ang_vel[env_ids, 0],
+                    ),
+                    dim=-1,
+                )
+            else:
+                # Preserve original GRAIL-SONIC reset behavior by default.
+                object_vel = torch.zeros(len(env_ids), 6, device=self.device)
             obj.write_root_state_to_sim(
-                torch.cat([obj_pos, self.object_root_quat[env_ids, 0], zero_vel], dim=-1),
+                torch.cat([obj_pos, self.object_root_quat[env_ids, 0], object_vel], dim=-1),
                 env_ids=env_ids,
             )
+            self._cache_reference_locked_object_state(
+                env_ids, obj_pos, self.object_root_quat[env_ids, 0]
+            )
+            audit_reset_index = self._next_object_audit_reset_index()
+            if audit_reset_index is not None:
+                motion_ids_for_envs = self.motion_ids[env_ids]
+                reference_steps = self.motion_start_time_steps[env_ids] + self.time_steps[env_ids]
+                for motion_id in torch.unique(motion_ids_for_envs):
+                    group_mask = motion_ids_for_envs == motion_id
+                    group_env_ids = env_ids[group_mask]
+                    motion_id_int = int(motion_id.item())
+                    self._append_full_scene_reset_audit(
+                        reset_index=audit_reset_index,
+                        motion_id=motion_id_int,
+                        motion_key=self.motion_lib.curr_motion_keys[motion_id_int],
+                        env_ids=group_env_ids,
+                        object_scene_keys=["object"],
+                        all_object_keys=["object"],
+                        object_pos=obj_pos[group_mask, None, :],
+                        object_quat=self.object_root_quat[group_env_ids, 0, None, :],
+                        reference_time_steps=reference_steps[group_mask],
+                    )
+                self._write_object_audit()
         if "table" in self._env.scene.rigid_objects:
             table = self._env.scene["table"]
 
@@ -3607,16 +6262,143 @@ class TrackingCommand(CommandTerm):
                 table_root_pose = torch.cat([table_pos, table_quat], dim=-1)
                 table.write_root_pose_to_sim(table_root_pose, env_ids=env_ids)
 
-        anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
-        anchor_quat_w_repeat = self.anchor_quat_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
+        # Clear any hold state inherited from the previous episode before
+        # arming the optional single-object reference hold. It can cover either an
+        # in-contact reset or the pre-contact approach plus a short release grace.
+        self.object_hold_frames_left[env_ids] = 0
+        self.object_hold_total_frames[env_ids] = 0
+        self.object_hold_exact_frames[env_ids] = 0
+        self.object_hold_release_frames[env_ids] = 0
+        if (
+            (
+                self.cfg.object_hold_after_in_contact_reset
+                or self.cfg.object_hold_before_reference_contact
+            )
+            and not self._multi_object_mode
+            and "object" in self._env.scene.rigid_objects
+        ):
+            start_steps = self.motion_start_time_steps[env_ids] + self.time_steps[env_ids]
+            hold_frames = torch.zeros(
+                len(env_ids), dtype=torch.long, device=self.device
+            )
+            exact_frames = torch.zeros_like(hold_frames)
+            release_frames = torch.zeros_like(hold_frames)
+            precontact_held = torch.zeros(
+                len(env_ids), dtype=torch.bool, device=self.device
+            )
+
+            if (
+                self.cfg.object_hold_before_reference_contact
+                and self._first_contact_lookup is not None
+            ):
+                first_contact = self._per_env_first_contact[env_ids]
+                motion_steps = self.motion_lib.get_time_step_total(
+                    self.motion_ids[env_ids]
+                )
+                precontact_held = (first_contact < motion_steps) & (
+                    start_steps < first_contact
+                )
+                precontact_frames = (
+                    first_contact - start_steps
+                ).clamp(min=0)
+                precontact_release_frames = torch.full_like(
+                    precontact_frames,
+                    max(int(self.cfg.object_hold_release_grace_frames), 0),
+                )
+                hold_frames = torch.where(
+                    precontact_held,
+                    precontact_frames + precontact_release_frames,
+                    hold_frames,
+                )
+                exact_frames = torch.where(
+                    precontact_held, precontact_frames, exact_frames
+                )
+                release_frames = torch.where(
+                    precontact_held, precontact_release_frames, release_frames
+                )
+
+            held = torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+            if self.cfg.object_hold_after_in_contact_reset:
+                for hand in ("left_hand", "right_hand"):
+                    in_contact = self.motion_lib.get_object_in_contact(
+                        self.motion_ids[env_ids], start_steps, hand=hand
+                    )
+                    if in_contact is not None:
+                        held |= in_contact > 0.5
+                configured_exact = max(
+                    int(getattr(self.cfg, "object_hold_replay_frames", 0)), 0
+                )
+                configured_release = max(
+                    int(getattr(self.cfg, "object_hold_release_frames", 0)), 0
+                )
+                if configured_exact > 0 or configured_release > 0:
+                    in_contact_exact = configured_exact
+                    in_contact_release = configured_release
+                else:
+                    # Legacy behavior: object_hold_frames is one cosine fade.
+                    in_contact_exact = 0
+                    in_contact_release = max(int(self.cfg.object_hold_frames), 0)
+                in_contact_total = in_contact_exact + in_contact_release
+                use_in_contact = held & (in_contact_total > hold_frames)
+                hold_frames = torch.where(
+                    use_in_contact,
+                    torch.full_like(hold_frames, in_contact_total),
+                    hold_frames,
+                )
+                exact_frames = torch.where(
+                    use_in_contact,
+                    torch.full_like(exact_frames, in_contact_exact),
+                    exact_frames,
+                )
+                release_frames = torch.where(
+                    use_in_contact,
+                    torch.full_like(release_frames, in_contact_release),
+                    release_frames,
+                )
+
+            self.object_hold_frames_left[env_ids] = hold_frames
+            self.object_hold_total_frames[env_ids] = hold_frames
+            self.object_hold_exact_frames[env_ids] = exact_frames
+            self.object_hold_release_frames[env_ids] = release_frames
+            if not getattr(self, "_object_hold_logged", False):
+                active = hold_frames > 0
+                active_frames = hold_frames[active]
+                frame_range = (
+                    f"{int(active_frames.min())}-{int(active_frames.max())}"
+                    if len(active_frames) > 0
+                    else "none"
+                )
+                print(  # noqa: T201
+                    f"[TrackingCommand] Object hold-and-release active: "
+                    f"{int(active.sum())}/{len(active)} reset envs held "
+                    f"(pre-contact={int(precontact_held.sum())}, "
+                    f"in-contact={int(held.sum())}, frames={frame_range}, "
+                    f"exact={int(exact_frames.max()) if len(exact_frames) else 0}, "
+                    f"release={int(release_frames.max()) if len(release_frames) else 0})"
+                )
+                self._object_hold_logged = True
+
+        self._refresh_relative_body_targets()
+
+    def _refresh_relative_body_targets(self):
+        """Refresh current-frame body targets in the robot anchor frame.
+
+        The reference frame advances every control step. Keeping these tensors
+        from the reset frame makes body rewards and end-effector terminations
+        compare the robot against a stale pose. Recompute the same heading- and
+        XY-invariant targets without changing their established semantics.
+        """
+        num_bodies = len(self.cfg.body_names)
+        anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(1, num_bodies, 1)
+        anchor_quat_w_repeat = self.anchor_quat_w[:, None, :].repeat(1, num_bodies, 1)
         robot_anchor_pos_w_repeat = self.robot_anchor_pos_w[:, None, :].repeat(
-            1, len(self.cfg.body_names), 1
+            1, num_bodies, 1
         )
         robot_anchor_quat_w_repeat = self.robot_anchor_quat_w[:, None, :].repeat(
-            1, len(self.cfg.body_names), 1
+            1, num_bodies, 1
         )
 
-        delta_pos_w = robot_anchor_pos_w_repeat  # Root position of the robot
+        delta_pos_w = robot_anchor_pos_w_repeat.clone()
         delta_pos_w[..., 2] = anchor_pos_w_repeat[..., 2]
         delta_ori_w = torch_transform.get_heading_q(
             quat_mul(robot_anchor_quat_w_repeat, quat_inv(anchor_quat_w_repeat))
@@ -3626,6 +6408,242 @@ class TrackingCommand(CommandTerm):
         self.body_pos_relative_w = delta_pos_w + quat_apply(
             delta_ori_w, self.body_pos_w - anchor_pos_w_repeat
         )
+
+    def _apply_object_hold_after_in_contact_reset(self):
+        """Blend temporarily held objects from reference replay into free physics.
+
+        ``_resample_command`` may arm an in-contact reset hold or a hold through
+        the reference pre-contact approach. A cosine blend starts at exact
+        reference replay and reaches zero correction on the final held frame,
+        avoiding a hard transition to free simulation.
+        """
+        held = self.object_hold_frames_left > 0
+        self.metrics["object_hold/active"] = held.float()
+        self.metrics["rp2_object_hold/active"] = held.float()
+        if not torch.any(held):
+            zeros = torch.zeros(
+                self.num_envs, dtype=torch.float32, device=self.device
+            )
+            self.metrics["object_hold/reference_blend"] = zeros
+            self.metrics["rp2_object_hold/reference_blend"] = zeros
+            self.metrics["rp2_object_hold/exact_replay"] = zeros
+            self.metrics["rp2_object_hold/release"] = zeros
+            return
+        if self._multi_object_mode or "object" not in self._env.scene.rigid_objects:
+            self.object_hold_frames_left.zero_()
+            self.object_hold_total_frames.zero_()
+            self.object_hold_exact_frames.zero_()
+            self.object_hold_release_frames.zero_()
+            return
+        env_ids = torch.where(held)[0]
+        obj = self._env.scene["object"]
+        reference_pos = self.object_root_pos[env_ids, 0].clone()
+        if self.cfg.object_position_randomize and hasattr(self, "_object_position_offset"):
+            reference_pos = reference_pos + self._object_position_offset[env_ids]
+        init_z_offset = getattr(self.cfg, "object_init_z_offset", 0.0)
+        if init_z_offset != 0.0:
+            reference_pos[:, 2] += init_z_offset
+        reference_quat = self.object_root_quat[env_ids, 0]
+        reference_vel = torch.cat(
+            (
+                self.object_root_lin_vel[env_ids, 0],
+                self.object_root_ang_vel[env_ids, 0],
+            ),
+            dim=-1,
+        )
+
+        remaining = self.object_hold_frames_left[env_ids]
+        total = self.object_hold_total_frames[env_ids].clamp(min=1)
+        exact = self.object_hold_exact_frames[env_ids].clamp(min=0)
+        release = self.object_hold_release_frames[env_ids].clamp(min=0)
+        elapsed = total - remaining
+        exact_phase = elapsed < exact
+        release_elapsed = (elapsed - exact).clamp(min=0)
+        release_denominator = (release - 1).clamp(min=1)
+        release_progress = release_elapsed.float() / release_denominator.float()
+        release_blend = 0.5 * (
+            1.0 + torch.cos(torch.pi * release_progress.clamp(max=1.0))
+        )
+        release_blend = torch.where(
+            release > 1, release_blend, torch.ones_like(release_blend)
+        )
+        reference_blend = torch.where(
+            exact_phase, torch.ones_like(release_blend), release_blend
+        )
+        blend = reference_blend[:, None]
+
+        object_pos = torch.lerp(obj.data.root_pos_w[env_ids, :3], reference_pos, blend)
+        object_quat = isaac_utils_rotations.slerp(
+            obj.data.root_quat_w[env_ids], reference_quat, blend
+        )
+        current_vel = torch.cat(
+            (obj.data.root_lin_vel_w[env_ids, :3], obj.data.root_ang_vel_w[env_ids, :3]),
+            dim=-1,
+        )
+        object_vel = torch.lerp(current_vel, reference_vel, blend)
+        obj.write_root_state_to_sim(
+            torch.cat([object_pos, object_quat, object_vel], dim=-1),
+            env_ids=env_ids,
+        )
+        blend_metric = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        blend_metric[env_ids] = reference_blend
+        self.metrics["object_hold/reference_blend"] = blend_metric
+        self.metrics["rp2_object_hold/reference_blend"] = blend_metric
+        exact_metric = torch.zeros_like(blend_metric)
+        exact_metric[env_ids] = exact_phase.float()
+        self.metrics["rp2_object_hold/exact_replay"] = exact_metric
+        release_metric = torch.zeros_like(blend_metric)
+        release_metric[env_ids] = (~exact_phase).float()
+        self.metrics["rp2_object_hold/release"] = release_metric
+        self.object_hold_frames_left[held] -= 1
+
+    def _cache_reference_locked_object_state(
+        self, env_ids: torch.Tensor, object_pos: torch.Tensor, object_quat: torch.Tensor
+    ):
+        """Cache the reset pose for targets configured as stationary supports."""
+        if not self.cfg.object_reference_lock_roles:
+            return
+        if not hasattr(self, "_object_reference_locked_state"):
+            self._object_reference_locked_state = torch.zeros(
+                self.num_envs, 13, dtype=object_pos.dtype, device=self.device
+            )
+        locked = self._target_object_role_mask(self.cfg.object_reference_lock_roles)[
+            env_ids
+        ]
+        if not torch.any(locked):
+            return
+        locked_env_ids = env_ids[locked]
+        zero_velocity = torch.zeros(
+            len(locked_env_ids), 6, dtype=object_pos.dtype, device=self.device
+        )
+        self._object_reference_locked_state[locked_env_ids] = torch.cat(
+            [object_pos[locked], object_quat[locked], zero_velocity], dim=-1
+        )
+
+    def _apply_object_reference_lock(self):
+        """Hold stationary support targets at their sampled reset pose."""
+        if not self.cfg.object_reference_lock_roles:
+            return
+        if self._multi_object_mode or "object" not in self._env.scene.rigid_objects:
+            return
+        if not hasattr(self, "_object_reference_locked_state"):
+            return
+        locked = self._target_object_role_mask(self.cfg.object_reference_lock_roles)
+        self.metrics["rp2_object/reference_locked"] = locked.float()
+        if not torch.any(locked):
+            return
+        env_ids = torch.where(locked)[0]
+        self._env.scene["object"].write_root_state_to_sim(
+            self._object_reference_locked_state[env_ids], env_ids=env_ids
+        )
+
+    def _clamp_static_active_articulation_roots(self):
+        """Hold stationary mechanism roots according to the configured clamp mode."""
+        config = getattr(self._env.cfg, "config", {}) or {}
+        if not bool(config.get("active_entity_runtime_clamp_static_roots", False)):
+            return
+        articulation = getattr(self._env.scene, "articulations", {}).get(
+            "active_articulation"
+        )
+        if articulation is None or not hasattr(
+            self.motion_lib, "_motion_active_articulation_root_dynamic_mask"
+        ):
+            return
+        root_dynamic = self.active_articulation_root_dynamic_mask
+        static_env_ids = torch.where(~root_dynamic)[0]
+        self.metrics["active_articulation/root_dynamic"] = root_dynamic.float()
+        if static_env_ids.numel() == 0:
+            return
+        passive_reset = bool(
+            config.get("active_articulation_passive_static_reset", False)
+        )
+        if passive_reset:
+            if not hasattr(self, "_active_articulation_static_root_state"):
+                raise RuntimeError(
+                    "Passive active-articulation root clamp was enabled before reset "
+                    "state was cached."
+                )
+            root_state = self._active_articulation_static_root_state[static_env_ids]
+        else:
+            root_state = torch.cat(
+                [
+                    self.active_articulation_root_pos[static_env_ids],
+                    self.active_articulation_root_quat[static_env_ids],
+                    self.active_articulation_root_lin_vel[static_env_ids],
+                    self.active_articulation_root_ang_vel[static_env_ids],
+                ],
+                dim=-1,
+            )
+        articulation.write_root_state_to_sim(root_state, env_ids=static_env_ids)
+
+    def _snapshot_completed_episodes(self, env_ids: Sequence[int]):
+        """Record the episode ``env_ids`` just finished, before the reset overwrites it.
+
+        Used only with ``adaptive_sampling.update_on_episode_end_only``. The
+        snapshot keeps the finished episode's motion id, sampled start step and
+        terminal step, and whether it ended by termination
+        (``env.reset_terminated``; time-outs and the soft motion-end wrap are
+        not failures). Envs that have not stepped since their previous reset
+        (the initial reset, duplicate resets; ``episode_length_buf == 0``, which
+        Isaac Lab zeroes only after the command reset) are not counted, so an
+        unfinished slot never adds an observation. ``_update_command`` consumes
+        the pending buffer exactly once.
+        """
+        env_ids_t = (
+            env_ids
+            if isinstance(env_ids, torch.Tensor)
+            else torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        )
+        if env_ids_t.dtype == torch.bool:
+            env_ids_t = torch.where(env_ids_t)[0]
+        episode_length = getattr(self._env, "episode_length_buf", None)
+        stepped = (
+            episode_length[env_ids_t] > 0
+            if episode_length is not None
+            else self.time_steps[env_ids_t] > 0
+        )
+        if not bool(stepped.any()):
+            return
+        env_ids_t = env_ids_t[stepped]
+        terminated = getattr(self._env, "reset_terminated", None)
+        failed = (
+            terminated[env_ids_t].bool()
+            if terminated is not None
+            else torch.zeros(env_ids_t.numel(), dtype=torch.bool, device=self.device)
+        )
+        self._pending_episode_mask[env_ids_t] = True
+        self._pending_episode_failed[env_ids_t] = failed
+        # Explicit casts into the int64 snapshot buffers: the live fields may be native int32
+        # (a restored motion state keeps the restored dtypes); indexed assignment does not cast,
+        # and start + elapsed must be added in int64 so two int32 operands cannot overflow.
+        self._pending_episode_motion_ids[env_ids_t] = self.motion_ids[env_ids_t].to(
+            self._pending_episode_motion_ids.dtype
+        )
+        start_steps = self.motion_start_time_steps[env_ids_t].to(
+            self._pending_episode_start_steps.dtype
+        )
+        elapsed_steps = self.time_steps[env_ids_t].to(self._pending_episode_end_steps.dtype)
+        self._pending_episode_start_steps[env_ids_t] = start_steps
+        self._pending_episode_end_steps[env_ids_t] = start_steps + elapsed_steps
+
+    def _consume_completed_episodes(self) -> int:
+        """Feed the pending completed episodes to the motion library and clear them.
+
+        Returns the number of episodes credited (to their OLD motion and bins).
+        """
+        completed = torch.where(self._pending_episode_mask)[0]
+        if completed.numel() == 0:
+            return 0
+        self.motion_lib.update_adaptive_sampling(
+            self._pending_episode_failed[completed],
+            self._pending_episode_motion_ids[completed],
+            self._pending_episode_end_steps[completed],
+            sampled_start_time_steps=self._pending_episode_start_steps[completed],
+        )
+        self._pending_episode_mask[completed] = False
+        return int(completed.numel())
 
     def _update_command(self):
         """Advance the motion time cursor by one step and handle episode wrap-around.
@@ -3639,15 +6657,53 @@ class TrackingCommand(CommandTerm):
         if self.use_adaptive_sampling:
             with common.Timer("update_adaptive_sampling"):
                 cur_time_steps = self.motion_start_time_steps + self.time_steps
-                self.motion_lib.update_adaptive_sampling(
-                    self._env.reset_terminated, self.motion_ids, cur_time_steps
+                terminal_only = bool(
+                    self.motion_lib.adaptive_sampling_cfg.get(
+                        "update_on_episode_end_only", False
+                    )
                 )
-        self.time_steps += 1
-        env_ids = torch.where(
-            self.time_steps + self.motion_start_time_steps
-            >= self.motion_lib.get_time_step_total(self.motion_ids)
-        )[0]
+                if terminal_only:
+                    # Completed episodes were snapshotted by _resample_command
+                    # BEFORE their reset; the live buffers already hold the
+                    # next episode of those envs.
+                    self._consume_completed_episodes()
+                else:
+                    self.motion_lib.update_adaptive_sampling(
+                        self._env.reset_terminated,
+                        self.motion_ids,
+                        cur_time_steps,
+                        sampled_start_time_steps=self.motion_start_time_steps,
+                    )
+        self.time_steps, env_ids = advance_motion_time_steps(
+            self.time_steps,
+            self.motion_start_time_steps,
+            self.motion_lib.get_time_step_total(self.motion_ids),
+            resample_on_motion_end=getattr(
+                self.cfg, "resample_on_motion_end", True
+            ),
+        )
+        if len(env_ids) > 0 and not getattr(self, "_warned_soft_wrap", False):
+            # This wrap-around teleports envs to a fresh start without an env
+            # reset, so stateful termination terms (e.g. grasp-failure
+            # trackers) keep values from the previous clip segment. With the
+            # tracking time_out termination enabled it fires one step earlier
+            # and this path stays dead; reaching it means terminations are
+            # configured such that mid-episode wraps corrupt that state.
+            print(  # noqa: T201
+                f"[TrackingCommand] WARNING: soft wrap-around resample fired for "
+                f"{len(env_ids)} env(s); termination-term state is NOT reset on "
+                "this path. Check that the tracking time_out termination is enabled."
+            )
+            self._warned_soft_wrap = True
         self._resample_command(env_ids)
+        self._refresh_relative_body_targets()
+        self._clamp_static_active_articulation_roots()
+        self._apply_object_reference_lock()
+        if (
+            self.cfg.object_hold_after_in_contact_reset
+            or self.cfg.object_hold_before_reference_contact
+        ):
+            self._apply_object_hold_after_in_contact_reset()
 
         # Exponential moving average update for running_ref_root_height.
         # ZL this should be moved to the recorders???
@@ -3734,8 +6790,9 @@ class TrackingCommand(CommandTerm):
         """Create or toggle visibility of debug visualization markers.
 
         Lazily initializes per-body frame markers, anchor markers, feet contact
-        markers, height-map dot markers, and contact center sphere markers on
-        first enable. Subsequent calls toggle visibility without re-creating prims.
+        markers, height-map dot markers, contact center sphere markers, and
+        optional current/reference object markers on first enable. Subsequent
+        calls toggle visibility without re-creating prims.
 
         Args:
             debug_vis: Whether to enable or disable debug visualization.
@@ -3785,14 +6842,14 @@ class TrackingCommand(CommandTerm):
                         )
                     )
 
-            self.current_anchor_visualizer.set_visibility(True)
-            self.goal_anchor_visualizer.set_visibility(True)
-            self.goal_pos_visualizer.set_visibility(True)
+            self.current_anchor_visualizer.set_visibility(self.cfg.debug_vis_body)
+            self.goal_anchor_visualizer.set_visibility(self.cfg.debug_vis_body)
+            self.goal_pos_visualizer.set_visibility(self.cfg.debug_vis_body)
             for i in range(len(self.cfg.body_names)):
-                self.current_body_visualizers[i].set_visibility(True)
-                self.goal_body_visualizers[i].set_visibility(True)
+                self.current_body_visualizers[i].set_visibility(self.cfg.debug_vis_body)
+                self.goal_body_visualizers[i].set_visibility(self.cfg.debug_vis_body)
             for i in range(len(self.cfg.feet_body_names)):
-                self.feet_contact_goal_visualizers[i].set_visibility(True)
+                self.feet_contact_goal_visualizers[i].set_visibility(self.cfg.debug_vis_body)
 
             if self.cfg.use_height_map:
                 if not hasattr(self, "height_map_visualizer"):
@@ -3815,6 +6872,38 @@ class TrackingCommand(CommandTerm):
             if not hasattr(self, "contact_center_visualizers"):
                 self.contact_center_visualizers = None
 
+            if self.cfg.debug_vis_object:
+                if not hasattr(self, "current_object_visualizer"):
+                    current_object_cfg = VisualizationMarkersCfg(
+                        prim_path="/Visuals/Command/current/active_object",
+                        markers={
+                            "object": sim_utils.SphereCfg(
+                                radius=self.cfg.debug_vis_object_radius,
+                                visual_material=sim_utils.PreviewSurfaceCfg(
+                                    diffuse_color=(0.0, 1.0, 0.0),
+                                ),
+                            ),
+                        },
+                    )
+                    reference_object_cfg = VisualizationMarkersCfg(
+                        prim_path="/Visuals/Command/goal/active_object",
+                        markers={
+                            "object": sim_utils.SphereCfg(
+                                radius=self.cfg.debug_vis_object_radius * 0.65,
+                                visual_material=sim_utils.PreviewSurfaceCfg(
+                                    diffuse_color=(1.0, 0.0, 0.0),
+                                ),
+                            ),
+                        },
+                    )
+                    self.current_object_visualizer = VisualizationMarkers(current_object_cfg)
+                    self.reference_object_visualizer = VisualizationMarkers(reference_object_cfg)
+                self.current_object_visualizer.set_visibility(True)
+                self.reference_object_visualizer.set_visibility(True)
+            elif hasattr(self, "current_object_visualizer"):
+                self.current_object_visualizer.set_visibility(False)
+                self.reference_object_visualizer.set_visibility(False)
+
         else:
             if hasattr(self, "current_anchor_visualizer"):
                 self.current_anchor_visualizer.set_visibility(False)
@@ -3832,6 +6921,9 @@ class TrackingCommand(CommandTerm):
             if hasattr(self, "contact_center_visualizers") and self.contact_center_visualizers:
                 for vis in self.contact_center_visualizers.values():
                     vis.set_visibility(False)
+            if hasattr(self, "current_object_visualizer"):
+                self.current_object_visualizer.set_visibility(False)
+                self.reference_object_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):  # noqa: ARG002
         """Update debug visualization marker positions each render frame.
@@ -3875,6 +6967,24 @@ class TrackingCommand(CommandTerm):
                 self.height_map_visualizer.visualize(
                     translations=self.scan_dot_pos_w.view(-1, 3),
                 )
+
+        if self.cfg.debug_vis_object and hasattr(self, "current_object_visualizer"):
+            current_pos, _, _, _, current_valid = mdp_utils.get_target_object_current_state(
+                self._env, self
+            )
+            reference_pos = self.active_entity_root_pos
+            marker_offset = torch.zeros_like(reference_pos)
+            marker_offset[:, 2] = self.cfg.debug_vis_object_z_offset
+            hidden_pos = torch.zeros_like(current_pos)
+            hidden_pos[:, 2] = -1000.0
+            current_marker_pos = current_pos + marker_offset
+            current_marker_pos = torch.where(
+                current_valid[:, None], current_marker_pos, hidden_pos
+            )
+            self.current_object_visualizer.visualize(translations=current_marker_pos)
+            self.reference_object_visualizer.visualize(
+                translations=reference_pos + marker_offset
+            )
 
         # Contact center visualization (lazy init on first callback)
         if (
@@ -4531,15 +7641,56 @@ class TrackingCommandCfg(CommandTermCfg):
     smpl_motion_file: str = None
     filter_motion_keys: list[str] = None
     use_paired_motions: bool = False
+    # Opt-in joint-roster mode: each environment keeps one immutable asset
+    # signature while reset sampling may choose any compatible motion.
+    use_asset_compatible_motions: bool = False
+    # Ownership-phase episodes (multi-human handoff handling): when enabled,
+    # reset starts are constrained to one contiguous actor-ownership phase
+    # (meta rp2_ownership_phases, written by rp2_patch_pack_ownership_channels
+    # or the actor-owned compose) and the episode ends at that phase's end, so
+    # no episode spans a handoff into partner-driven object motion.
+    ownership_phase_episodes: bool = False
+    # Directory of per-motion meta pkls carrying rp2_ownership_phases
+    # (typically <pack>/meta). Required when ownership_phase_episodes is True.
+    ownership_meta_dir: str = None
+    # Minimum episode frames remaining inside the chosen phase after the
+    # sampled start; also the minimum phase length considered.
+    ownership_min_episode_frames: int = 30
     # Contact-based initialization: sample timestamps before first contact frame
     # Path to contact pickle file (e.g., data/motion_lib_grab/contact/s2_apple_lift.pkl)
     contact_file: str = None
-    # If True, sample only timestamps before the first contact frame
+    # Optional JSON mapping motion keys to first hand-or-body contact in the
+    # motion-lib target-FPS frame domain. This changes reset timing only.
+    reference_contact_boundary_file: str = None
+    # If True, optionally bias reset starts toward frames before first contact.
     sample_before_contact: bool = False
-    # Margin (in frames) before first contact to sample from
+    # "legacy" (default) overrides every start with uniform [0, first_contact - margin);
+    # "windowed" is the ContactFirst mixture that keeps the full valid window reachable.
+    sample_before_contact_window_mode: str = "legacy"
+    # Source of the first-contact boundary used by reset bias. The joint
+    # contract uses the same canonical active-entity +1 labels as reward and
+    # termination; legacy keeps historical per-hand/contact-file behavior.
+    first_contact_reference_source: str = "legacy"
+    # Probability of replacing a valid uniform start with a pre-contact start.
+    # A value below one preserves full support over the valid start interval.
+    sample_before_contact_bias_probability: float = 1.0
+    # Minimum lead-in (in target-FPS reference steps) before first contact.
     sample_before_contact_margin: int = 10
+    # Preferred source-independent lead-in in physical seconds. When set, it
+    # overrides sample_before_contact_margin after conversion to runtime steps.
+    sample_before_contact_margin_seconds: float = None
     # Which hand's in_contact label to use for deriving first contact frame
     sample_before_contact_hand: str = "right_hand"
+    # Optional versioned reset-start cache. It is opt-in so existing GRAIL and
+    # GRAIL-SONIC experiments retain their historical reset behavior.
+    reset_start_cache_file: str = None
+    # Minimum accepted cache validation: candidate, reference, or isaaclab.
+    reset_start_cache_required_validation: str = "reference"
+    # Fail during initialization if any loaded motion lacks an accepted range.
+    reset_start_cache_require_all: bool = False
+    # An explicitly configured cache applies consistently to training and evaluation.
+    # Set false only for a deliberate out-of-cache evaluation.
+    reset_start_cache_apply_in_evaluation: bool = True
     anchor_body: str = dataclasses.MISSING
     body_names: list[str] = dataclasses.MISSING
 
@@ -4600,6 +7751,15 @@ class TrackingCommandCfg(CommandTermCfg):
     # Useful for debugging and replaying specific motions from the beginning
     start_from_first_frame: bool = False
 
+    # Preserve historical tracking behavior by default. Reference-free
+    # generative controllers disable this: _resample_command writes the source
+    # motion's robot/object state into the simulator at clip exhaustion.
+    resample_on_motion_end: bool = True
+
+    # Evaluation-only deterministic start relative to first reference contact.
+    # None preserves the original frame-zero evaluation behavior.
+    evaluation_start_before_contact_frames: int = None
+
     # Sample each motion at most once (no duplicates across environments)
     # Requires num_envs <= num_available_motions, otherwise will error
     # Useful for replay/evaluation to ensure coverage of all unique motions
@@ -4610,8 +7770,102 @@ class TrackingCommandCfg(CommandTermCfg):
     # Useful for adding slight variation while still starting near the beginning
     sample_from_n_initial_frames: int = None
 
+    # Reserve this many seconds at the end of a motion when sampling reset starts.
+    # None keeps the legacy full-window sampling used by the released
+    # task-general tracking configs; the ContactFirst manipulation chain sets
+    # 10.0 to match its ten-second environment episode.
+    sample_start_truncate_time_s: float = None
+
+    # Source-only RP2 mode. The default remains the original motion-reference
+    # reset. When enabled, reset uses neutral G1 joints plus scaled SOMA root
+    # XY/yaw channels and never writes retargeted G1 joint/root state.
+    source_only_reset: bool = False
+    source_reset_use_source_z: bool = True
+    source_reset_min_root_height: float = 0.72
+    # Optional initialization-only curriculum. Retargeted G1 state may seed a
+    # reset, but is never exposed to observations, rewards, or terminations.
+    source_reset_retarget_probability_start: float = 0.0
+    source_reset_retarget_probability_end: float = 0.0
+    source_reset_curriculum_steps: int = 5000
+    source_reset_force_retarget_nonstanding: bool = False
+    source_reset_nonstanding_joint_rms: float = 0.35
+    source_reset_retarget_min_root_height: float = 0.30
+    source_reset_use_reference_hand_action: bool = False
+    # Reset the extra (hand) joints to the EXACT reference dof[29:43] (mapped BY JOINT NAME in
+    # HAND_ORDER_USD == IsaacLab articulation order) instead of hand_default_positions. Requires
+    # motion_lib_cfg.hand_dof_count>0 so hand_dof_pos is loaded. False preserves the zero-default.
+    reset_hand_from_reference: bool = False
+    # Initialize a sampled moving object with its reference linear/angular
+    # velocity. False preserves the original zero-velocity reset.
+    object_reset_use_reference_velocity: bool = False
+    # Hold-and-release for episodes that reset into a reference frame that is
+    # already in contact: the object is driven along its reference trajectory
+    # for the first `object_hold_frames` control steps after such a reset. The
+    # reference correction follows a cosine fade to free physics. This gives
+    # the policy time to establish the grasp instead of racing a free-falling
+    # object it was never holding. Single-object scenes only and disabled by
+    # default to preserve original GRAIL-SONIC behavior.
+    object_hold_after_in_contact_reset: bool = False
+    object_hold_frames: int = 10
+    # Optional two-phase in-contact reset replay. Positive values replace the
+    # legacy single cosine fade with exact reference replay followed by a
+    # separate cosine release. Both zero preserves object_hold_frames exactly.
+    object_hold_replay_frames: int = 0
+    object_hold_release_frames: int = 0
+    # Keep a dynamic single target on its reference trajectory while the
+    # episode is still before the first left-or-right reference hand contact.
+    # A short grace period supports contact establishment before free physics.
+    # Disabled by default to preserve the original GRAIL-SONIC behavior.
+    object_hold_before_reference_contact: bool = False
+    object_hold_release_grace_frames: int = 10
+    # Optional RP2 one-object corrections. Per-motion mass metadata comes from
+    # manager_env.config.object_physics_overrides_path. Reference locking holds
+    # stationary support targets at the pose sampled during reset. Both remain
+    # disabled by default to preserve legacy GRAIL-SONIC behavior.
+    object_mass_from_physics_overrides: bool = False
+    object_reference_lock_roles: list[str] = None
+
     # Object position randomization (adds random offset to object position at reset)
     object_position_randomize: bool = False
+    # In multi_object_per_env mode, keep all object_i assets in the scene and
+    # reset them from root_pos/root_quat[:, i] instead of activating one object.
+    full_scene_per_env: bool = False
+    # Optional full-scene reset audit JSON path. When set, reset records include
+    # motion/object pairing, per-object first-frame reference poses, BPS presence,
+    # and role metadata. This is intentionally opt-in for validation runs.
+    audit_path: str = None
+    audit_max_resets: int = 0
+    object_roles_path: str = None
+    # When object motion data includes object_interaction_mask, legacy single-object
+    # terms track the currently active object set instead of a static object index.
+    use_dynamic_target_object_mask: bool = True
+    # Log RP2 per-role object active counts and position errors as command metrics.
+    enable_rp2_object_role_metrics: bool = True
+    rp2_role_metric_pos_exp_coeff: float = -100.0
+    rp2_role_metric_pos_deviation_threshold: float = 0.1
+    rp2_support_body_metric_names: list[str] = [  # noqa: RUF012
+        "pelvis",
+        "torso_link",
+        "left_hip_roll_link",
+        "left_knee_link",
+        "right_hip_roll_link",
+        "right_knee_link",
+    ]
+    rp2_ee_body_height_metric_names: list[str] = [  # noqa: RUF012
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+        "left_wrist_yaw_link",
+        "right_wrist_yaw_link",
+    ]
+    rp2_ee_body_height_metric_threshold: float = 0.25
+    enable_rp2_support_diagnostic_labels: bool = True
+    rp2_diag_moving_support_pos_error_threshold: float = 0.5
+    rp2_diag_moving_support_ori_error_threshold: float = 1.5
+    rp2_diag_moving_support_height_error_threshold: float = 0.3
+    rp2_diag_support_contact_force_threshold: float = 500.0
+    rp2_diag_support_contact_force_active_threshold: float = 250.0
+    rp2_diag_support_body_pos_error_threshold: float = 0.2
+    rp2_diag_ee_body_height_error_threshold: float = 0.25
     # Randomization range for each axis: {"x": 0.05, "y": 0.05, "z": 0.0}
     # Values are half-range, so 0.05 means uniform random in [-0.05, 0.05]
     object_position_randomization: dict[str, float] = None
@@ -4726,6 +7980,10 @@ class TrackingCommandCfg(CommandTermCfg):
     # When False, suppress body/skeleton reference markers in debug vis
     # (contact center spheres still render). Useful for cleaner video captures.
     debug_vis_body: bool = True
+    # Evaluation diagnostic only: green=current active object, red=reference target.
+    debug_vis_object: bool = False
+    debug_vis_object_radius: float = 0.06
+    debug_vis_object_z_offset: float = 0.12
 
 
 @configclass

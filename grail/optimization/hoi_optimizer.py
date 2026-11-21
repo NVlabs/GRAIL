@@ -1,3 +1,4 @@
+import copy
 import datetime
 import json
 import os
@@ -13,8 +14,6 @@ from pytorch3d.transforms import (
 )
 
 from grail.constants.image import FOCAL_LENGTH, HEIGHT, WIDTH
-from grail.core.contact_label import detect_contact_joints_interval
-from grail.core.depth_config import DEPTH_CACHE_SUBDIR
 from grail.core.io import (
     load_character_data,
     load_human_motion_data,
@@ -23,20 +22,20 @@ from grail.core.io import (
     load_object_pose_data,
 )
 from grail.core.logging import create_logger
+from grail.core.paths import depth_cache as depth_cache_path
 from grail.core.torch_utils import tensor_to_numpy
 from grail.core.video import (
-    extract_frames_from_video,
     get_video_fps_and_frame_count,
 )
 from grail.models.human_model import create_human_model
 from grail.optimization.data_types import HOIData, HOIPrediction, OptParams
 from grail.optimization.evaluator import pre_eval, truncate_data
 from grail.optimization.interaction import (
-    get_contact_labels_for_frame,
     identify_interaction_start_end,
     identify_interaction_start_end_with_mask,
 )
 from grail.optimization.loss_computer import LossComputer
+from grail.optimization.stage2_policy import stage2_skip_decision
 from grail.optimization.visualizer import HOIVisualizer
 from grail.pose_est.utils import smooth_axis_angle_sequence, smooth_pose_sequence
 from grail.preprocessing.preprocess import load_depth_from_cache, load_masks_from_cache
@@ -53,7 +52,7 @@ from grail.visualization.scenepic import ScenepicVisualizer
 class HOIOptimizer:
     """
     Human-Object Interaction Optimizer
-    Optimizes SMPL human motion and object trajectories
+    Optimizes SOMA human motion and object trajectories
     """
 
     def __init__(self, exp_name, cfg, cache_dir, output_dir, device="cuda"):
@@ -69,8 +68,15 @@ class HOIOptimizer:
             device (str): Device for computations
         """
         self.device = device
-        self.cfg = cfg
-
+        self.cfg = copy.deepcopy(cfg)
+        retired = {
+            "human_pose_knot_stride", "human_body_joint_ids", "contact_acquisition_events",
+            "human_translation_bounds_m", "contact_gradient_routing", "human_feasibility_guard",
+            "human_collision_guard", "contact_acquisition_reduction", "object_stationary_intervals",
+            "allowed_body_joint_indices",
+        }
+        if retired.intersection(cfg):
+            raise ValueError(f"Unsupported SOMA optimizer settings: {sorted(retired.intersection(cfg))}")
         self.log_dir = os.path.join(output_dir, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
         self.logger = create_logger(self.log_dir)
         self.cache_list = self.cfg.get("cache_list", [])
@@ -85,6 +91,15 @@ class HOIOptimizer:
         print(f"Object name: {self.obj_name}")
 
         self.opt_stage_specs = self.cfg["opt_stage_specs"]
+        self._validate_contact_configuration()
+        for contact in self._fixed_contact_configs() + self._phase_contact_map_configs():
+            path = contact.get("prediction_path")
+            if not isinstance(path, str) or not path:
+                raise ValueError("Authored contact requires prediction_path in the Stage 2 config")
+            contact["prediction_path"] = path.format(
+                cache_dir=self.cache_dir, sequence=self.exp_name
+            )
+        self._resolve_phase_contact_temporal_configs()
 
         self.vis_cfg = self.cfg["vis_cfg"]
         self.enable_vis = self.vis_cfg.get("enable", True)
@@ -95,9 +110,133 @@ class HOIOptimizer:
         self.pre_eval_cfg = self.cfg.get("pre_eval", {})
         self.min_frames_threshold = self.pre_eval_cfg.get("min_frames", None)
 
-        # Body model — polymorphic: SOMA, SMPL-X, or G1-proportioned SMPL-X
+        # Build the native body specified by the case.
         self.human_model = create_human_model(self.cfg["human_model"], device)
         self.logger.info(f"Using {self.human_model.model_type} body model")
+
+    def _validate_contact_configuration(self):
+        """Reject removed coarse-label consumers before loading native assets."""
+        if self.cfg.get("contact_source") == "reviewed":
+            raise ValueError("Use native SOMA phase contact maps for reviewed manipulation")
+        for group in self._contact_loss_groups():
+            temporal = group.get("phase_contact_temporal", {})
+            if temporal.get("weight", 0) == 0:
+                continue
+            contact = group.get("contact", {})
+            if contact.get('mode') != 'phase_contact_map' or contact.get('weight', 0) == 0:
+                raise ValueError(
+                    "Temporal contact requires an enabled phase_contact_map in the same loss group; "
+                    "fixed/reviewed contacts and independent nested maps cannot be mixed"
+                )
+
+        if (
+            "contact_labels" in self.cfg
+            or "contact_interval_length" in self.cfg
+            or "contact_labels" in self.cache_list
+        ):
+            raise ValueError(
+                "VLM contact labels/caches were removed; author per-hand video intervals"
+            )
+        groups = [stage.get("loss_cfg", {}) for stage in self.opt_stage_specs.values()]
+        groups.append(self.cfg.get("eval", {}))
+        for group in groups:
+            for name in ("contact_smoothness", "contact_distribution_smoothness"):
+                if name in group:
+                    raise ValueError(f"{name} used removed VLM labels; use reviewed fixed pairs")
+            contact = group.get("contact", {})
+            if contact.get("weight", 0) == 0:
+                continue
+            if contact.get("mode") in ("fixed_prediction", "phase_contact_map"):
+                continue
+            if (
+                contact.get("dense_contact_prediction")
+                and contact.get("mode", "legacy_nearest") == "legacy_nearest"
+            ):
+                continue  # Separate explicit dense-region experiments, not VLM labels.
+            raise ValueError(
+                "Legacy nearest contact was removed; use phase_contact_map or fixed_prediction "
+                "with a reviewed video interval manifest (docs/fixed_contact_points.md)"
+            )
+
+    def _fixed_contact_configs(self):
+        """Enabled fixed-contact stage/evaluation configs; no inferred fallbacks."""
+        groups = [stage.get("loss_cfg", {}) for stage in self.opt_stage_specs.values()]
+        groups.append(self.cfg.get("eval", {}))
+        return [
+            group["contact"]
+            for group in groups
+            if group.get("contact", {}).get("mode") == "fixed_prediction"
+            and group["contact"].get("weight", 0) != 0
+        ]
+
+    def _phase_contact_map_configs(self):
+        """Independent region-map configs share source/original-geometry binding."""
+        groups = [stage.get("loss_cfg", {}) for stage in self.opt_stage_specs.values()]
+        groups.append(self.cfg.get("eval", {}))
+        return [
+            group["contact"]
+            for group in groups
+            if group.get("contact", {}).get("mode") == "phase_contact_map"
+            and group["contact"].get("weight", 0) != 0
+        ]
+
+    def _contact_loss_groups(self):
+        groups = [
+            stage.get("loss_cfg", {}) for stage in getattr(self, "opt_stage_specs", {}).values()
+        ]
+        return groups + [self.cfg.get("eval", {})]
+
+    def _phase_contact_temporal_configs(self):
+        return [
+            group["phase_contact_temporal"]
+            for group in self._contact_loss_groups()
+            if group.get("phase_contact_temporal", {}).get("weight", 0) != 0
+        ]
+
+    def _resolve_phase_contact_temporal_configs(self):
+        """Resolve per-case paths without reading the Stage 2 review sidecar yet."""
+        for group in self._contact_loss_groups():
+            temporal = group.get("phase_contact_temporal", {})
+            if temporal.get("weight", 0) == 0:
+                continue
+            contact = group["contact"]
+            if "contact" in temporal:
+                nested = copy.deepcopy(temporal["contact"])
+                path = nested.get("prediction_path")
+                if not isinstance(path, str) or not path:
+                    raise ValueError("Temporal contact requires a resolved prediction_path")
+                nested["prediction_path"] = path.format(
+                    cache_dir=self.cache_dir, sequence=self.exp_name
+                )
+                nested_identity = {
+                    key: value
+                    for key, value in nested.items()
+                    if key not in ("weight", "threshold")
+                }
+                main_identity = {
+                    key: value
+                    for key, value in contact.items()
+                    if key not in ("weight", "threshold")
+                }
+                if nested_identity != main_identity:
+                    raise ValueError(
+                        "Temporal contact map and settings must match the main contact objective"
+                    )
+            # One material map and one transition policy per loss group. The
+            # temporal loss applies its own component weights, not contact.weight.
+            temporal["contact"] = copy.deepcopy(contact)
+            if "scope_path" in temporal:
+                path = temporal["scope_path"]
+                if not isinstance(path, str) or not path:
+                    raise ValueError("Temporal scope_path must be a nonempty string")
+                temporal["scope_path"] = path.format(
+                    cache_dir=self.cache_dir, sequence=self.exp_name
+                )
+        if self._phase_contact_temporal_configs() and self.cfg.get("output_smoothing", False):
+            raise ValueError(
+                "Temporal contact workflow requires output_smoothing: false; "
+                "export the evaluated native trajectory without a second filter"
+            )
 
     def init_data(self, video_file, hmr_file, obj_path, obj_pose_file, render_config_file):
         """Load all data and assemble HOIData for optimization."""
@@ -117,15 +256,21 @@ class HOIOptimizer:
         images_path, video_fps, video_frame_count = self._load_video_frames(video_file)
         human_masks, obj_masks = self._load_masks(video_id)
 
-        # 4. Interaction detection
+        # Reviewed phases replace automatic interaction/contact inference entirely.
         inter_start_idx, inter_end_idx, is_static_obj = self._detect_interaction(
             obj_poses_incam, images_path, human_masks, obj_masks
         )
 
+        # No object motion uses the end-exclusive sentinel T for stationarity.
+        # Native alignment must instead use a valid observed frame.
+        align_frame = self._motion_alignment_frame(inter_start_idx, len(images_path))
         # 5. Human motion data
         motion_data, motion_data_global_init, foot_contact_probs = self._load_motion(
-            hmr_file, render_config_file, opencv_cam_R, opencv_cam_t, inter_start_idx
+            hmr_file, render_config_file, opencv_cam_R, opencv_cam_t, align_frame
         )
+        # The source video defines the timeline for both cached motion variants.
+        motion_data["mocap_frame_rate"] = float(video_fps)
+        motion_data_global_init["mocap_frame_rate"] = float(video_fps)
 
         # Validate frame counts
         frame_num = motion_data["poses"].shape[0]
@@ -136,18 +281,49 @@ class HOIOptimizer:
                 f"Frame count mismatch - Video: {video_frame_count}, SMPL: {frame_num}"
             )
 
-        # 6. Contact labels
-        contact_labels, contact_interval, contact_start_idx = self._detect_contact_labels(
-            video_id, frame_num, inter_start_idx, is_static_obj, images_path
-        )
-
         # 7. Depth maps
         depth_maps = self._load_depth(video_id)
 
         # 8. Prepare GT keypoints
-        human_faces = self.human_model.generate_mesh(
+        human_vertices, human_faces = self.human_model.generate_mesh(
             motion_data, output_joints=False, require_grad=False
-        )[1]
+        )[:2]
+        fixed_context = None
+        if (
+            self.cfg.get("export_contact_review_inputs", False)
+            or self._fixed_contact_configs()
+            or self._phase_contact_map_configs()
+        ):
+            from grail.optimization.fixed_contact import build_binding, file_sha256
+
+            # Original face IDs must never index the remeshed tracking mesh.
+            contact_vertices, contact_faces, _ = load_mesh(
+                obj_path, mesh_scale=obj_scale, target_num_verts=None, device=self.device
+            )
+            binding = build_binding(
+                sequence=self.exp_name,
+                source_video_sha256=file_sha256(video_file),
+                frame_count=frame_num,
+                fps=float(video_fps),
+                human_model_type=self.human_model.model_type,
+                human_vertex_count=human_vertices.shape[1],
+                human_faces=human_faces,
+                object_vertices=contact_vertices,
+                object_faces=contact_faces,
+            )
+            fixed_context = dict(
+                binding=binding, object_vertices=contact_vertices, object_faces=contact_faces
+            )
+            # Reusable prediction/export inputs; these contain NO invented pairs.
+            with open(os.path.join(self.log_dir, "fixed_contact_binding.json"), "w") as f:
+                json.dump(binding, f, indent=2)
+            np.savez_compressed(
+                os.path.join(self.log_dir, "fixed_contact_geometry.npz"),
+                human_faces=human_faces.detach().cpu().numpy(),
+                object_vertices=contact_vertices.detach().cpu().numpy(),
+                object_faces=contact_faces.detach().cpu().numpy(),
+            )
+
         gt_body_kp, gt_hand_kp = self.human_model.extract_gt_keypoints(motion_data)
 
         # 9. Transform object vertices to per-frame positions
@@ -167,9 +343,6 @@ class HOIOptimizer:
         self.video_fps = video_fps
         self.image_list = images_path
         self.depth_list = depth_maps
-        self.contact_labels = contact_labels
-        self.contact_interval = contact_interval
-        self.contact_start_idx = contact_start_idx
 
         # ── Assemble HOIData ─────────────────────────────────────────────────
         return HOIData(
@@ -199,6 +372,7 @@ class HOIOptimizer:
             depth_maps=depth_maps,
             is_static_obj=is_static_obj,
             static_objects=static_objects,
+            fixed_contact_context=fixed_context,
         )
 
     # ── init_data sub-methods (no self.* side effects) ───────────────────────
@@ -253,22 +427,11 @@ class HOIOptimizer:
         video_basename = os.path.basename(video_file).split(".")[0]
         frame_cache_dir = os.path.join(os.path.dirname(video_file), "frames", video_basename)
 
+
         video_fps, video_frame_count = get_video_fps_and_frame_count(video_file)
 
         images_path = sorted(glob(os.path.join(frame_cache_dir, "*.jpg")))
-        if not images_path:
-            extracted = extract_frames_from_video(video_file, frame_cache_dir)
-            if extracted != video_frame_count:
-                raise RuntimeError(
-                    f"Frame extraction mismatch - Video: {video_frame_count}, "
-                    f"Extracted: {extracted}"
-                )
-            images_path = sorted(glob(os.path.join(frame_cache_dir, "*.jpg")))
-        if len(images_path) != video_frame_count:
-            raise RuntimeError(
-                f"Incomplete frame cache - Video: {video_frame_count}, "
-                f"Cached: {len(images_path)} at {frame_cache_dir}"
-            )
+
         return images_path, video_fps, video_frame_count
 
     def _load_masks(self, video_id):
@@ -276,7 +439,7 @@ class HOIOptimizer:
         masks_cache_file = os.path.join(self.cache_dir, "masks", f"{video_id}.npz")
         if not os.path.exists(masks_cache_file):
             raise FileNotFoundError(
-                f"Masks cache not found: {masks_cache_file}. Run preprocessing (step1) first."
+                f"Masks cache not found: {masks_cache_file}. Run preprocessing (step2) first."
             )
         preprocess_masks = load_masks_from_cache(masks_cache_file)
         # Preprocess saves obj=0, human=1 — split into separate dicts
@@ -286,7 +449,7 @@ class HOIOptimizer:
         return human_masks, obj_masks
 
     def _detect_interaction(self, obj_poses_incam, images_path, human_masks, obj_masks):
-        """Detect interaction start/end frame."""
+        """Estimate object motion; never infer human contact from this proxy."""
         has_interaction_end = self.cfg.get("has_interaction_end", False)
         if self.cfg.get("detect_interaction_with_mask", False):
             self.logger.info("Using mask-based interaction detection")
@@ -309,10 +472,16 @@ class HOIOptimizer:
         if self.cfg.get("is_static_obj", False):
             # override the result if is_static_obj is set True in the config
             is_static_obj = True
-        self.logger.info(f"Interaction start frame: {inter_start_idx}/{len(images_path)}")
-        self.logger.info(f"Interaction end frame: {inter_end_idx}/{len(images_path)}")
+        self.logger.info(f"Object-motion proxy start: {inter_start_idx}/{len(images_path)}")
+        self.logger.info(f"Object-motion proxy end: {inter_end_idx}/{len(images_path)}")
         self.logger.info(f"Is static object: {is_static_obj}")
         return inter_start_idx, inter_end_idx, is_static_obj
+
+    @staticmethod
+    def _motion_alignment_frame(motion_start, frame_count):
+        if frame_count <= 0 or not 0 <= motion_start <= frame_count:
+            raise ValueError("Object-motion onset must lie on the source timeline")
+        return 0 if motion_start == frame_count else motion_start
 
     def _load_motion(
         self, hmr_file, render_config_file, opencv_cam_R, opencv_cam_t, inter_start_idx
@@ -385,96 +554,29 @@ class HOIOptimizer:
         )
         return motion_data, motion_data_global_init, foot_contact_probs
 
-    def _detect_contact_labels(
-        self, video_id, frame_num, inter_start_idx, is_static_obj, images_path
-    ):
-        """Detect or load cached per-interval contact labels.
-
-        Returns:
-            (contact_labels, contact_interval, contact_start_idx)
-            contact_labels is a list of per-interval label lists, e.g. [["R_Hand"], None, ["L_Hand"]]
-        """
-        interval = self.cfg.get("contact_interval_length", 8)
-        cache_file = os.path.join(self.cache_dir, "contact_labels", f"{video_id}.json")
-
-        # skip VLM contact detection for static objects (e.g. stairs)
-        # since the contact loss is zeroed out for them anyway.
-        if is_static_obj:
-            contact_labels = []
-            interval = []
-            start_idx = inter_start_idx
-            self.logger.info("Skipping contact label detection (is_static_obj=True)")
-        elif "contact_labels" in self.cache_list and os.path.exists(cache_file):
-            self.logger.info(f"Loading contact labels from cache: {cache_file}")
-            with open(cache_file, "r") as f:
-                cache_data = json.load(f)
-            # Support both old and new cache key names
-            contact_labels = cache_data.get(
-                "contact_labels", cache_data.get("contact_labels_per_interval", [])
-            )
-            interval = cache_data.get(
-                "contact_interval", cache_data.get("contact_interval_length", interval)
-            )
-            start_idx = cache_data.get(
-                "contact_start_idx", cache_data.get("contact_interval_start_idx", inter_start_idx)
-            )
-        elif self.cfg.get("contact_labels", None) is not None:
-            per_interval = self.cfg["contact_labels"]
-            n_intervals = max(1, (frame_num - inter_start_idx + interval - 1) // interval)
-            contact_labels = [per_interval for _ in range(n_intervals)]
-            start_idx = inter_start_idx
-            self.logger.info(f"Using contact labels from config: {per_interval}")
-        else:
-            contact_labels = detect_contact_joints_interval(
-                images_path,
-                self.obj_name,
-                interval_length=interval,
-                start_idx=inter_start_idx,
-                end_idx=frame_num,
-            )
-            start_idx = inter_start_idx
-
-            # Validate: ensure at least one interval has labels
-            has_any = any(labels is not None and len(labels) > 0 for labels in contact_labels)
-            if not has_any:
-                contact_labels = [["R_Hand"]]
-                self.logger.warning("No contact labels detected, using default: R_Hand")
-
-            self.logger.info(f"Detected contact labels: {contact_labels}")
-
-            # Save to cache
-            if "contact_labels" in self.cache_list:
-                os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-                with open(cache_file, "w") as f:
-                    json.dump(
-                        {
-                            "contact_labels": contact_labels,
-                            "contact_interval": interval,
-                            "contact_start_idx": start_idx,
-                        },
-                        f,
-                        indent=2,
-                    )
-                self.logger.info(f"Saved contact labels to cache: {cache_file}")
-
-        # backward compatibility with old caches
-        for i, entry in enumerate(contact_labels):
-            if isinstance(entry, str):
-                contact_labels[i] = [entry]
-
-        self.logger.info(
-            f"Contact labels ({len(contact_labels)} intervals, interval={interval}): {contact_labels}"
-        )
-        return contact_labels, interval, start_idx
-
     def _load_depth(self, video_id):
         """Load preprocessed depth maps from cache."""
-        depth_cache_file = os.path.join(self.cache_dir, DEPTH_CACHE_SUBDIR, f"{video_id}.pt")
+        depth_override = self.cfg.get("depth_cache_override")
+        if depth_override is not None:
+            from grail.optimization.hoi_depth_cache import validate_depth_override
+
+            validate_depth_override(depth_override)
+            depth_cache_file = depth_override["path"]
+        else:
+            depth_cache_file = depth_cache_path(self.cache_dir, "", video_id)
         if not os.path.exists(depth_cache_file):
             raise FileNotFoundError(
-                f"Depth cache not found: {depth_cache_file}. Run preprocessing (step1) first."
+                f"Depth cache not found: {depth_cache_file}. Run preprocessing (step2) first."
             )
         depth_maps = load_depth_from_cache(depth_cache_file, device=self.device)
+        if depth_override is not None:
+            if len(depth_maps) != depth_override["frame_count"]:
+                raise ValueError("Explicit depth cache frame-count mismatch")
+            for frame in depth_maps:
+                if not torch.is_tensor(frame) or frame.ndim != 2:
+                    raise ValueError("Explicit depth cache requires 2D tensors")
+                if not torch.isfinite(frame).all() or torch.any(frame < 0):
+                    raise ValueError("Explicit depth cache contains invalid values")
         self.logger.info(f"Loaded depth from cache: {depth_cache_file}")
         return depth_maps
 
@@ -485,11 +587,13 @@ class HOIOptimizer:
         self.num_body_joints = self.human_model.num_body_joints
         self.num_hand_joints = self.human_model.num_hand_joints
 
+        pose_count = frame_num
+
         self.params = OptParams(
             human_trans_global=torch.zeros(3, device=self.device, requires_grad=True),
             human_trans_res=torch.zeros(frame_num, 3, device=self.device, requires_grad=True),
             human_pose_res=torch.tensor(
-                identity_6d.reshape(1, 1, 6).repeat(frame_num, self.num_body_joints, 1),
+                identity_6d.reshape(1, 1, 6).repeat(pose_count, self.num_body_joints, 1),
                 device=self.device,
                 requires_grad=True,
             ),
@@ -505,12 +609,28 @@ class HOIOptimizer:
             ),
             obj_t_res=torch.zeros(frame_num, 3, device=self.device, requires_grad=True),
         )
+        if self.cfg.get("frozen_hand_pose", False):
+            if not all(k in data.human.motion_data for k in ("left_hand_pose", "right_hand_pose")):
+                raise ValueError("frozen_hand_pose requires explicit left/right hand pose arrays")
+            self.params.hand_pose_res.requires_grad_(False)
+        if self.cfg.get("freeze_human_translation", False):
+            self.params.human_trans_global.requires_grad_(False)
+            self.params.human_trans_res.requires_grad_(False)
         return self.params
 
     def get_opt_params(self, params, opt_vars, is_static_obj=False):
         opt_params = {}
 
         for opt_var in opt_vars:
+            if self.cfg.get("frozen_hand_pose", False) and opt_var == "hand_pose_res":
+                self.logger.info("Skipping hand_pose_res (frozen_hand_pose=True)")
+                continue
+            if self.cfg.get("freeze_human_translation", False) and opt_var in (
+                "human_trans_global",
+                "human_trans_res",
+            ):
+                self.logger.info(f"Skipping {opt_var} (freeze_human_translation=True)")
+                continue
             if is_static_obj and opt_var in ("obj_R_res", "obj_t_res"):
                 self.logger.info(f"Skipping optimization of {opt_var} (static object)")
                 continue
@@ -521,14 +641,6 @@ class HOIOptimizer:
                 self.logger.warning(f"Optimization parameter {opt_var} not found")
 
         return opt_params
-
-    def get_contact_labels_for_frame(self, frame_idx):
-        return get_contact_labels_for_frame(
-            frame_idx,
-            self.contact_labels,
-            self.contact_start_idx,
-            self.contact_interval,
-        )
 
     def init_opt(self, data, params, opt_config):
         is_static_obj = data.is_static_obj
@@ -583,7 +695,7 @@ class HOIOptimizer:
 
         return optimizer, opt_params
 
-    def forward(self, data, params):
+    def forward(self, data, params, *, apply_object_stationary=True):
         frame_num = data.frame_num
 
         # Extract per-frame parameters
@@ -612,13 +724,28 @@ class HOIOptimizer:
             frame_num,
         )
 
+
+        # Restore frozen values before mesh evaluation. Identity rotation
+        # round-trips alone do not preserve axis-angle arrays bit for bit.
+        source_motion = data.human.motion_data
+        if self.cfg.get("frozen_hand_pose", False):
+            for hand_key in ("left_hand_pose", "right_hand_pose"):
+                motion_data[hand_key] = source_motion[hand_key].clone()
+        if self.cfg.get("freeze_human_translation", False):
+            human_trans_res = torch.zeros_like(human_trans_res)
+            human_trans_global = torch.zeros_like(human_trans_global)
+
         pred_root_pose, pred_body_pose = self.human_model.extract_root_body_pose(motion_data)
 
         # Apply translation residuals
         trans = motion_data["trans"].reshape(frame_num, 3)
-        motion_data["trans"] = (
-            trans + human_trans_res.reshape(frame_num, 3) + human_trans_global.reshape(1, 3)
-        )
+        if self.cfg.get("freeze_human_translation", False):
+            motion_data["trans"] = source_motion["trans"].clone()
+        else:
+            motion_data["trans"] = (
+                trans + human_trans_res.reshape(frame_num, 3) + human_trans_global.reshape(1, 3)
+            )
+
 
         pred_human_verts_seq, _ = self.human_model.generate_mesh(
             motion_data,
@@ -663,6 +790,7 @@ class HOIOptimizer:
         pred_obj_R = torch.bmm(obj_R_res_mat, obj_poses[:, :3, :3])
         pred_obj_t = obj_poses[:, :3, 3].reshape(frame_num, 3) + obj_t_res.reshape(frame_num, 3)
 
+
         pred_obj_verts_seq = obj_verts.unsqueeze(0).repeat(frame_num, 1, 1)
         pred_obj_verts_seq = torch.bmm(
             pred_obj_verts_seq, pred_obj_R.transpose(1, 2)
@@ -676,8 +804,19 @@ class HOIOptimizer:
 
         return HOIPrediction(human=pred_human, obj=pred_obj)
 
+
     def optimize_main(self, data, opt_config):
         """Run optimization for a single stage."""
+        self.loss_computer.reset_foot_ground_temporal_reference()
+        contact = opt_config.get("loss_cfg", {}).get("contact", {})
+        if contact.get("mode") == "fixed_prediction" and contact.get("weight", 0) != 0:
+            # Fail before any Stage 2 update if the prediction/binding is missing or stale.
+            self.loss_computer.prepare_fixed_contact(data, contact)
+        if contact.get("mode") == "phase_contact_map" and contact.get("weight", 0) != 0:
+            self.loss_computer.prepare_phase_contact_map(data, contact)
+        temporal = opt_config.get("loss_cfg", {}).get("phase_contact_temporal", {})
+        if temporal.get("weight", 0) != 0:
+            self.loss_computer.prepare_phase_contact_temporal(data, temporal)
         optimizer, opt_params = self.init_opt(data, self.params, opt_config)
         if len(opt_params.keys()) == 0:
             self.logger.warning("No optimization parameters found. Skipping optimization...")
@@ -687,23 +826,39 @@ class HOIOptimizer:
         loss_cfg = opt_config["loss_cfg"]
 
         for cur_iter in range(opt_niter):
+
             optimizer.zero_grad()
             pred = self.forward(data, self.params)
             loss, loss_dict = self.loss_computer.compute_loss(data, pred, loss_cfg)
+
             loss.backward()
+
             optimizer.step()
+
 
             self.write_logs(cur_iter, loss_dict, opt_config)
 
-        self.logger.info(
-            f"Human pelvis after optimization stage: {pred.human.body_joints_seq[0, 0, :]}"
-        )
+        self.logger.info(f"Completed optimization stage: {opt_config['stage']}")
 
     def optimize(self, data):
         print("Starting HOI optimization...")
         # Validate that data has been initialized
         if not hasattr(self, "obj_mesh") or self.obj_mesh is None:
             raise ValueError("Data not initialized. Call init_data() first.")
+
+        from grail.optimization.ground_config import configure_loss_support
+
+        configure_loss_support(self.cfg, getattr(self, "video_fps", None))
+
+        # Decide from the complete original trajectory before pre-evaluation can
+        # truncate it or Stage 1 can change it. The interaction-onset flag is a
+        # loose translation proxy and is not evidence of complete stationarity.
+        self._stage2_static_policy = None
+        if 'contact_opt' in self.opt_stage_specs:
+            self._stage2_static_policy = stage2_skip_decision(
+                self.cfg, getattr(data.obj, "poses", None)
+            )
+        skip_stage2 = bool(self._stage2_static_policy and self._stage2_static_policy["skip"])
 
         if self.enable_vis:
             self.visualizer = HOIVisualizer(
@@ -727,12 +882,19 @@ class HOIOptimizer:
             self.device,
             self.logger,
         )
+
         if failed_frame is not None:
+            if self._phase_contact_map_configs() and not skip_stage2:
+                raise ValueError(
+                    "Source pre-evaluation would truncate a bound phase contact-map timeline; "
+                    "review the input instead of changing authored frame indices"
+                )
             truncate_data(data, failed_frame, self.logger)
             self.image_list = data.images_path
             self.depth_list = data.depth_maps
 
-        # Initialize params after pre_eval (in case data was truncated)
+        # Initialize params after pre_eval (in case data was truncated).
+
         self.init_params(data)
 
         # Create loss computer after init_params (needs self.num_body_joints)
@@ -740,10 +902,10 @@ class HOIOptimizer:
             cameras=self.cameras,
             human_model=self.human_model,
             device=self.device,
-            get_contact_labels_for_frame_fn=self.get_contact_labels_for_frame,
             num_body_joints=self.num_body_joints,
             logger=self.logger,
         )
+
 
         if self.enable_vis:
             if self.vis_cfg.get("vis_init", False):
@@ -753,8 +915,15 @@ class HOIOptimizer:
 
         if pre_eval_pass:
             for stage, stage_specs in self.opt_stage_specs.items():
+                if stage == "contact_opt" and skip_stage2:
+                    self.logger.info(
+                        "Skipping Stage 2 contact optimization: %s",
+                        self._stage2_static_policy["reason"],
+                    )
+                    continue
                 stage_specs["stage"] = stage
                 self.optimize_main(data, stage_specs)
+
 
                 if self.enable_vis:
                     pred = self.forward(data, self.params)
@@ -764,8 +933,17 @@ class HOIOptimizer:
             print("Pre-evaluation failed. Skipping optimization...")
 
         pred = self.forward(data, self.params)
+        eval_cfg = self.eval_cfg
+        if skip_stage2:
+            # Evaluation must not reopen the skipped Stage 2 maps or sidecars.
+            # Other source/geometry diagnostics remain enabled.
+            eval_cfg = {
+                key: value
+                for key, value in eval_cfg.items()
+                if key not in ("contact", "phase_contact_temporal")
+            }
+        eval_data = self.eval(data, pred, eval_cfg)
         optimized_data = self.get_optimized_data(data, pred)
-        eval_data = self.eval(data, pred, self.eval_cfg)
         optimized_data["eval_data"] = eval_data
 
         return optimized_data
@@ -777,7 +955,7 @@ class HOIOptimizer:
         eval_data = tensor_to_numpy(eval_data)
         return eval_data
 
-    def get_optimized_data(self, data, pred=None, to_numpy=True, smooth=True):
+    def get_optimized_data(self, data, pred=None, to_numpy=True, smooth=None):
         if pred is None:
             pred = self.forward(data, self.params)
 
@@ -786,16 +964,19 @@ class HOIOptimizer:
             self.logger.info("Applying smoothing to human motion...")
             frame_num = human_data["poses"].shape[0]
 
-            human_data["poses"] = smooth_axis_angle_sequence(
-                human_data["poses"].reshape(frame_num, -1, 3),
+            original_poses = human_data["poses"]
+            smoothed_poses = smooth_axis_angle_sequence(
+                original_poses.reshape(frame_num, -1, 3),
                 window_length=11,
                 polyorder=2,
             ).reshape(frame_num, -1)
-            human_data["trans"] = smooth_pose_sequence(
-                human_data["trans"], window_length=11, polyorder=2
-            )
+            human_data["poses"] = smoothed_poses
+            if not self.cfg.get("freeze_human_translation", False):
+                human_data["trans"] = smooth_pose_sequence(
+                    human_data["trans"], window_length=11, polyorder=2
+                )
             for hand_key in ("left_hand_pose", "right_hand_pose"):
-                if hand_key in human_data:
+                if hand_key in human_data and not self.cfg.get("frozen_hand_pose", False):
                     human_data[hand_key] = smooth_axis_angle_sequence(
                         human_data[hand_key].reshape(frame_num, -1, 3),
                         window_length=11,
@@ -815,6 +996,15 @@ class HOIOptimizer:
         obj_R = pred.obj.R
         obj_t = pred.obj.trans
 
+        if smooth is None:
+            smooth = self.cfg.get(
+                "output_smoothing", not bool(self._phase_contact_temporal_configs())
+            )
+        if smooth and self._phase_contact_temporal_configs():
+            raise ValueError(
+                "Temporal contact exports require smooth=False to preserve the evaluated native trajectory"
+            )
+        # Reviewed exports retain the evaluated native motion exactly.
         if smooth:
             human_data, obj_R, obj_t = smooth_results(human_data, obj_R, obj_t)
 
@@ -836,6 +1026,35 @@ class HOIOptimizer:
                 "inter_end_idx": data.inter_end_idx,
             },
         }
+
+        if getattr(self, "_stage2_static_policy", None) is not None:
+            optimized_data["meta"]["stage2_static_policy"] = copy.deepcopy(
+                self._stage2_static_policy
+            )
+
+
+        fixed_contact = (
+            self.loss_computer.fixed_contact_export(data)
+            if hasattr(self, "loss_computer")
+            else None
+        )
+        if fixed_contact is not None:
+            optimized_data["meta"]["fixed_contact_prediction"] = fixed_contact
+            optimized_data["obj_data"]["obj_contact_points"] = fixed_contact["obj_contact_points"]
+
+        phase_map = (
+            self.loss_computer.phase_contact_map_export(data)
+            if hasattr(self, "loss_computer")
+            else None
+        )
+        if phase_map is not None:
+            if fixed_contact is not None:
+                raise ValueError(
+                    "Do not mix fixed pairs and independent contact maps in one native output"
+                )
+            optimized_data["meta"].pop("fixed_contact_prediction", None)
+            optimized_data["meta"]["phase_contact_map"] = phase_map
+            optimized_data["obj_data"]["obj_contact_points"] = {}
 
         if data.static_objects is not None:
             optimized_data["scene_data"] = tensor_to_numpy(data.static_objects)

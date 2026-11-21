@@ -5,7 +5,7 @@ Steps:
     1. Native SOMA03 body/hand prediction (GEM-X, default)
     2. Preprocessing (SAM2 mask tracking + depth estimation)
     3. Object pose estimation (MoSE3/FoundationPose hybrid + smoothing)
-    4. 4D HOI optimization with the original contact-label pipeline
+    4. 4D HOI optimization with video-authored Stage 2 contact maps
     5. Filter & post-process results
     6. Visualize results (ScenePic)
 """
@@ -79,8 +79,8 @@ def _origin_id(video_id):
 
 def step1_predict_human_motion(video_ids, args):
     """Predict the explicitly selected native model, preserving estimated shape."""
-    if args.body_model not in ("soma03", "smplx", "g1_smplx"):
-        raise ValueError("Human prediction requires soma03, smplx or g1_smplx")
+    if args.body_model != "soma03":
+        raise ValueError("Human prediction requires soma03")
     output_dir = f"{args.results_dir}/{args.hmr_dir}"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(f"{args.results_dir}/{args.hmr_cache_dir}", exist_ok=True)
@@ -540,8 +540,6 @@ def step5_filter_hoi_result(video_ids, args):
                 from grail.models.human_model import create_human_model
 
                 human_model = create_human_model(args.cfg["human_model"], device=args.device)
-                if human_model.model_type == "soma03":
-                    human_model.load_shape_params(args.cfg["human_model"], None, args.device)
                 vis_input = prep_visualizer_input(
                     hoi_processed,
                     human_model=human_model,
@@ -663,6 +661,8 @@ def main():
 
     parser.set_defaults(**cfg_flat)
     args = parser.parse_args()
+    if args.body_model != "soma03":
+        parser.error("reconstruction requires human_model.body_model: soma03")
 
     from grail.core.types import parse_recon_config
 

@@ -8,5 +8,10 @@ grasp_reward:
       name: "object_to_hand_contact_sensor"
     contact_threshold: 0.1
     min_contacts: 3
+    gate_mode: "binary"
+    pre_contact_frames: 0
+    post_contact_frames: 0
+    gate_sigma_frames: 5.0
+    contact_time_shift_frames: 0
     hand: "right_hand"
     command_name: "motion"

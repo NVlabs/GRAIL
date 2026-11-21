@@ -1762,6 +1762,24 @@ G1_43DOF_CFG = ArticulationCfg(
     },
 )
 
+# Opt-in collision variant for object-rich scenes. The source layer is the
+# unchanged GRAIL-SONIC asset; the overlay only enables convex collision on the
+# existing exposed waist-yaw visual mesh.
+G1_43DOF_WAIST_COLLISION_CFG = G1_43DOF_CFG.replace(
+    spawn=G1_43DOF_CFG.spawn.replace(
+        usd_path="gear_sonic/data/robots/g1/g1_43dof_s3_waist_collision.usda",
+    )
+)
+
+# Opt-in collision-only overlay derived from the YAM robot's core body. It
+# preserves the 43-DOF dexterous-hand articulation and changes only the hip-roll
+# and elbow collision primitives used by object-rich RP2 scenes.
+G1_43DOF_YAM_CORE_COLLISION_CFG = G1_43DOF_CFG.replace(
+    spawn=G1_43DOF_CFG.spawn.replace(
+        usd_path="gear_sonic/data/robots/g1/g1_43dof_s3_yam_core_collision.usda",
+    )
+)
+
 G1_43DOF_LARGER_HIP_NO_HEAD_ELBOW_CFG = G1_43DOF_CFG.replace(
     spawn=G1_43DOF_CFG.spawn.replace(
         usd_path="groot/rl/data/robots/g1/g1_43dof_s3_larger_hip_no_head_elbow.usda",

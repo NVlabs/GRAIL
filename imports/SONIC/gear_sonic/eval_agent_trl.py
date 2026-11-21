@@ -13,6 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Fix sys.path: when running as `python gear_sonic/eval_agent_trl.py`, Python adds
+# gear_sonic/ to sys.path[0], causing `from trl import ...` to resolve to our local
+# gear_sonic/trl/ instead of the HuggingFace trl package. Replace with repo root.
+import sys
+import os
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_root = os.path.dirname(_script_dir)
+if _script_dir in sys.path:
+    sys.path.remove(_script_dir)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 try:
     import isaaclab  # noqa: F401
 except ImportError:
@@ -431,6 +443,10 @@ def main(override_config: omegaconf.OmegaConf):
 
     checkpoint_path = str(config.checkpoint)
     logger.info(f"Loading checkpoint from {checkpoint_path}")
+    # TRL < 0.28.0 checkpoints pickle references to trl.trainer.utils symbols
+    from gear_sonic.trl.utils.common import ensure_trl_trainer_utils_alias
+
+    ensure_trl_trainer_utils_alias()
     checkpoint = torch.load(checkpoint_path, map_location=accelerator.device, weights_only=False)
 
     # Load policy state dict with backward compatibility for std/log_std

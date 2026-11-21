@@ -15,6 +15,15 @@ from gear_sonic.utils.batch_normalizer import BatchNormNormalizer
 from gear_sonic.utils.running_mean_std import RunningMeanStd
 
 
+
+def backbone_consumes_episode_attnmask(module) -> bool:
+    """False for the plain MLP BaseModule forward, which accepts and ignores every keyword argument; True for any backbone
+    that overrides forward (sequence / transformer / aux modules), which may consume ``episode_attnmask``."""
+    from gear_sonic.trl.modules.base_module import BaseModule
+
+    return not (isinstance(module, BaseModule) and type(module).forward is BaseModule.forward)
+
+
 class Actor(nn.Module):
     """Policy network that maps observations to action distributions.
 
@@ -129,6 +138,28 @@ class Actor(nn.Module):
         self.clamp_noise_std = algo_config.get("clamp_noise_std", False)
         if self.clamp_noise_std:
             self.max_noise_std = algo_config.get("max_noise_std", 1.0)
+
+        # Optional per-slice noise configuration for heterogeneous action spaces.
+        # This is used by RP2 experiments whose policy output contains latent,
+        # joint-space residual, and hand-primitive coordinates with different units.
+        self.action_std_group_slices = {}
+        self._has_action_std_groups = False
+        self._configure_action_std_groups(algo_config.get("action_std_groups", None))
+        self._zero_action_mean_slices(algo_config.get("zero_action_mean_slices", None))
+
+        contact_std_cfg = algo_config.get("contact_phase_std", {}) or {}
+        self.contact_phase_std_enabled = bool(contact_std_cfg.get("enabled", False))
+        self.contact_phase_std_obs_key = contact_std_cfg.get("obs_key", "contact_phase")
+        self.contact_phase_std_far_scale = float(contact_std_cfg.get("far_scale", 1.0))
+        self.contact_phase_std_contact_scale = float(contact_std_cfg.get("contact_scale", 0.25))
+        self.contact_phase_std_min = float(contact_std_cfg.get("min_std", 1e-6))
+        if self.contact_phase_std_enabled:
+            print(  # noqa: T201
+                "[Actor] contact_phase_std enabled: "
+                f"obs_key={self.contact_phase_std_obs_key}, "
+                f"far_scale={self.contact_phase_std_far_scale}, "
+                f"contact_scale={self.contact_phase_std_contact_scale}"
+            )
         self.safe_nan = False  # Propagated from env wrapper via ppo_trainer
 
         self.distribution = None
@@ -144,9 +175,143 @@ class Actor(nn.Module):
     def reset(self, dones=None):
         pass
 
+    def _configure_action_std_groups(self, groups_cfg):
+        """Initialize optional action slices with independent std constraints."""
+        if not groups_cfg:
+            return
+
+        if hasattr(groups_cfg, "items"):
+            groups = list(groups_cfg.items())
+        else:
+            groups = [(str(index), cfg) for index, cfg in enumerate(groups_cfg)]
+
+        if self.algo_config.get("use_clampped_std", False):
+            default_min = float(self.algo_config.std_clamp_min)
+            default_max = float(self.algo_config.std_clamp_max)
+        elif self.clamp_noise_std:
+            default_min = 1.0e-6
+            default_max = float(self.max_noise_std)
+        else:
+            default_min = 1.0e-6
+            default_max = float("inf")
+
+        std_min = torch.full((self.num_actions,), default_min, dtype=torch.float32)
+        std_max = torch.full((self.num_actions,), default_max, dtype=torch.float32)
+        fixed_mask = torch.zeros(self.num_actions, dtype=torch.bool)
+        fixed_value = torch.zeros(self.num_actions, dtype=torch.float32)
+
+        covered = torch.zeros(self.num_actions, dtype=torch.bool)
+        for name, cfg in groups:
+            start = int(cfg.get("start", 0))
+            end = int(cfg.get("end", 0))
+            if start < 0 or end <= start or end > self.num_actions:
+                raise ValueError(
+                    f"Invalid action std group '{name}' range [{start}, {end}) "
+                    f"for {self.num_actions} actions"
+                )
+            if covered[start:end].any():
+                raise ValueError(f"Action std group '{name}' overlaps an earlier group")
+
+            init_std = float(cfg.get("init_std", self.init_noise_std))
+            group_min = float(cfg.get("min_std", default_min))
+            group_max = float(cfg.get("max_std", default_max))
+            is_fixed = bool(cfg.get("fixed", False))
+            if init_std <= 0.0 or group_min <= 0.0 or group_max < group_min:
+                raise ValueError(
+                    f"Invalid std values for action group '{name}': "
+                    f"init={init_std}, min={group_min}, max={group_max}"
+                )
+            if not group_min <= init_std <= group_max:
+                raise ValueError(
+                    f"Initial std {init_std} for action group '{name}' is outside "
+                    f"[{group_min}, {group_max}]"
+                )
+
+            with torch.no_grad():
+                if self.use_log_std:
+                    self.log_std[start:end].fill_(float(torch.log(torch.tensor(init_std))))
+                else:
+                    self.std[start:end].fill_(init_std)
+            std_min[start:end] = group_min
+            std_max[start:end] = group_max
+            if is_fixed:
+                fixed_mask[start:end] = True
+                fixed_value[start:end] = init_std
+            covered[start:end] = True
+            self.action_std_group_slices[str(name)] = (start, end)
+
+        self.register_buffer("_action_std_min", std_min, persistent=False)
+        self.register_buffer("_action_std_max", std_max, persistent=False)
+        self.register_buffer("_action_std_fixed_mask", fixed_mask, persistent=False)
+        self.register_buffer("_action_std_fixed_value", fixed_value, persistent=False)
+        self._has_action_std_groups = True
+        print(  # noqa: T201
+            "[Actor] action std groups: "
+            + ", ".join(
+                f"{name}=[{start}:{end}]"
+                for name, (start, end) in self.action_std_group_slices.items()
+            )
+        )
+
+    def _zero_action_mean_slices(self, slices_cfg):
+        """Zero selected rows of the actor's final action-mean projection."""
+        if not slices_cfg:
+            return
+
+        candidates = [
+            module
+            for module in self.actor_module.modules()
+            if isinstance(module, nn.Linear) and module.out_features == self.num_actions
+        ]
+        if not candidates:
+            raise ValueError(
+                "zero_action_mean_slices was configured, but no final Linear layer "
+                f"with {self.num_actions} outputs was found"
+            )
+        output_layer = candidates[-1]
+        normalized_slices = []
+        with torch.no_grad():
+            for bounds in slices_cfg:
+                start, end = int(bounds[0]), int(bounds[1])
+                if start < 0 or end <= start or end > self.num_actions:
+                    raise ValueError(
+                        f"Invalid zero-action-mean range [{start}, {end}) "
+                        f"for {self.num_actions} actions"
+                    )
+                output_layer.weight[start:end].zero_()
+                if output_layer.bias is not None:
+                    output_layer.bias[start:end].zero_()
+                normalized_slices.append((start, end))
+        print(f"[Actor] zero-initialized action mean slices: {normalized_slices}")  # noqa: T201
+
+    def action_std_group_means(self):
+        """Return detached mean std values for configured action groups."""
+        if not self._has_action_std_groups:
+            return {}
+        std = self.get_std.detach()
+        return {
+            name: std[start:end].mean().item()
+            for name, (start, end) in self.action_std_group_slices.items()
+        }
+
     @property
     def get_std(self):
         """Get the standard deviation, handling both std and log_std parameterizations."""
+        if self._has_action_std_groups:
+            if self.use_log_std:
+                raw_std = torch.exp(torch.clamp(self.log_std, min=-20.0, max=20.0))
+            else:
+                raw_std = self.std
+            std = torch.maximum(
+                torch.minimum(raw_std, self._action_std_max), self._action_std_min
+            )
+            std = torch.where(
+                self._action_std_fixed_mask,
+                self._action_std_fixed_value,
+                std,
+            )
+            return std
+
         if self.use_log_std:
             # First, handle NaN or inf in log_std
             if torch.any(torch.isnan(self.log_std)) or torch.any(torch.isinf(self.log_std)):
@@ -200,6 +365,31 @@ class Actor(nn.Module):
                 with torch.no_grad():
                     self.std.clamp_(max=self.max_noise_std)
             return self.std
+
+    def _apply_contact_phase_std(self, std: torch.Tensor, obs_dict: dict, mean: torch.Tensor):
+        """Scale action std per sample from a motion-reference contact phase."""
+        if not self.contact_phase_std_enabled or self.contact_phase_std_obs_key not in obs_dict:
+            return std
+
+        phase = obs_dict[self.contact_phase_std_obs_key]
+        if not torch.is_tensor(phase):
+            return std
+        phase = phase.to(device=mean.device, dtype=mean.dtype)
+        if phase.shape[-1] > 1:
+            phase = phase.max(dim=-1, keepdim=True).values
+        if mean.ndim == 2 and phase.ndim == 3:
+            phase = phase[:, -1]
+        elif mean.ndim == 3 and phase.ndim == 2:
+            phase = phase.unsqueeze(1).expand(mean.shape[0], mean.shape[1], phase.shape[-1])
+        while phase.ndim < mean.ndim:
+            phase = phase.unsqueeze(-1)
+        phase = torch.clamp(phase, min=0.0, max=1.0)
+
+        scale = self.contact_phase_std_far_scale + (
+            self.contact_phase_std_contact_scale - self.contact_phase_std_far_scale
+        ) * phase
+        std_view = std.view(*([1] * (mean.ndim - 1)), -1)
+        return torch.clamp((mean * 0.0 + std_view) * scale, min=self.contact_phase_std_min)
 
     def forward(self, obs_dict, is_training=False, **kwargs):
         """Compute action means from observations.
@@ -282,6 +472,7 @@ class Actor(nn.Module):
 
         # Get std using the property that handles both parameterizations
         std = self.get_std
+        std = self._apply_contact_phase_std(std, obs_dict, mean)
         if self.safe_nan:
             if torch.any(torch.isnan(mean)) or torch.any(torch.isinf(mean)):
                 print("[WARNING] Invalid action mean detected! Replacing invalid entries with 0.0.")  # noqa: T201
@@ -489,6 +680,7 @@ class Actor(nn.Module):
         # Update distribution
         if self.safe_nan:
             std = self.get_std
+            std = self._apply_contact_phase_std(std, obs_dict, action_mean)
             if torch.any(torch.isnan(action_mean)) or torch.any(torch.isinf(action_mean)):
                 print("[WARNING] Invalid action mean detected in rollout_with_tokens! Replacing invalid entries with 0.0.")  # noqa: T201
                 action_mean = torch.nan_to_num(action_mean, nan=0.0, posinf=0.0, neginf=0.0)
@@ -499,6 +691,7 @@ class Actor(nn.Module):
             scale = (torch.zeros_like(action_mean) + std).clamp(min=1e-6)
         else:
             std = self.get_std if self.use_log_std else self.std
+            std = self._apply_contact_phase_std(std, obs_dict, action_mean)
             scale = (action_mean * 0.0 + std).clamp(min=1e-6)
         self.distribution = Normal(action_mean, scale)
 
@@ -588,6 +781,12 @@ class Actor(nn.Module):
 
     def train_mode(self):
         self.is_eval_mode = False
+
+
+    @property
+    def needs_episode_attnmask(self) -> bool:
+        """Whether this actor's backbone can consume an episode attention mask (the MLP path cannot)."""
+        return backbone_consumes_episode_attnmask(self.actor_module)
 
 
 class Critic(nn.Module):
@@ -681,3 +880,8 @@ class Critic(nn.Module):
                     obs_dict["critic_obs"] = self.running_mean_std(obs_dict["critic_obs"])
         value = self.critic(obs_dict, **kwargs)
         return value
+
+    @property
+    def needs_episode_attnmask(self) -> bool:
+        """Whether this critic's backbone can consume an episode attention mask (the MLP path cannot)."""
+        return backbone_consumes_episode_attnmask(self.critic_module)

@@ -20,6 +20,8 @@
 *.hdf5 filter=lfs diff=lfs merge=lfs -text
 *.parquet filter=lfs diff=lfs merge=lfs -text
 *.obj filter=lfs diff=lfs merge=lfs -text
+/examples/g1-2dhoi/*/generation/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+/examples/g1-2dhoi/*/generation/**/*.pickle -text
 *.dae filter=lfs diff=lfs merge=lfs -text
 *.so filter=lfs diff=lfs merge=lfs -text
 *.so.* filter=lfs diff=lfs merge=lfs -text
@@ -31,3 +33,6 @@ docs/source/_static/** filter= diff= merge=
 /data/body_profiles/unitree_g1/characters/** -text
 /data/body_profiles/unitree_g1/characters/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 /data/body_profiles/unitree_g1/characters/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# Preserve the upstream MJCF, including its original line endings and spacing.
+/assets/robots/unitree_g1/g1_mocap_29dof_with_hands.xml -text whitespace=-blank-at-eol
