@@ -1,37 +1,49 @@
-GRAIL: Generating Humanoid Loco-Manipulation from World Models
-==============================================================
+GRAIL documentation
+===================
+
+Start with a video. Recover the human and object motion, transfer it to a Unitree G1, and train a policy to follow it in simulation. The two examples include the video, camera and metric object mesh.
+
+.. tip::
+
+   **First time here?** Check :doc:`GPU, disk and time requirements <requirements>`, then :doc:`start the GPU container <installation>` and :doc:`download the weights <downloads>`.
+
+Choose a tutorial
+-----------------
+
+.. grid:: 1 1 2 2
+   :gutter: 3
+
+   .. grid-item-card:: Climb stairs
+      :link: tutorials/stairs
+      :link-type: doc
+      :img-top: _static/examples/stairs.jpg
+
+      Watch the fitted feet land on each tread, then train a simulated G1 to climb the same stairs.
+
+   .. grid-item-card:: Lift a kettlebell
+      :link: tutorials/kettlebell
+      :link-type: doc
+      :img-top: _static/examples/kettlebell.jpg
+
+      Inspect the human grasp, then watch the robot fingers close around the handle. Continue to simulation to measure how far the policy follows the lift.
+
+For a new case, see :doc:`the generation route and real-footage limits <tutorials/own-video>`. You can finish with the G1 motion and preview, or continue to simulation. See the :doc:`glossary <configuration>` and :doc:`outputs reference <outputs>`.
+
+Pipeline at a glance
+--------------------
 
 .. raw:: html
 
    <p>
-     <a href="https://nvlabs.github.io/GRAIL/"><img src="https://img.shields.io/badge/Project-Page-blue?style=flat-square" alt="Project Page"></a>
-     <a href="https://arxiv.org/pdf/2606.05160"><img src="https://img.shields.io/badge/Paper-PDF-red?style=flat-square" alt="Paper"></a>
-     <a href="https://github.com/NVlabs/GRAIL/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-NVIDIA-76B900?style=flat-square" alt="License"></a>
-     <a href="https://github.com/isaac-sim/IsaacLab/releases/tag/v2.3.2"><img src="https://img.shields.io/badge/IsaacLab-2.3.2-76B900?style=flat-square" alt="IsaacLab"></a>
+     <a href="https://research.nvidia.com/labs/dair/grail/">Project</a> ·
+     <a href="https://arxiv.org/abs/2606.05160">Paper</a> ·
+     <a href="https://github.com/NVlabs/GRAIL">Source code</a>
    </p>
 
 .. image:: ../../assets/videos/teaser.gif
    :alt: GRAIL teaser
    :align: center
    :width: 100%
-
-GRAIL — *Generating Humanoid Loco-Manipulation from World Models* —
-is a fully digital data-generation pipeline for robot-compatible humanoid
-loco-manipulation. It composes 3D assets, simulator-ready scenes,
-robot-proportioned characters, and video foundation model priors to synthesize
-interactions in known metric 3D configurations, then reconstructs 4D
-human-object trajectories, retargets them to the Unitree G1, and trains
-task-general manipulation and locomotion trackers. The resulting egocentric
-visual policies transfer from GRAIL-generated data to real-world object
-pick-up and stair-climbing.
-
-.. tip::
-
-   **New here?** Start with :doc:`installation`, then
-   :doc:`quick_start` for a 5-minute smoke run.
-
-Pipeline at a glance
---------------------
 
 .. image:: ../../assets/images/hoigen.jpeg
    :alt: HOI generation pipeline
@@ -43,22 +55,12 @@ Pipeline at a glance
    :align: center
    :width: 100%
 
-.. code-block:: text
+The bundled examples start at the video and scene. If you are generating a new
+scene, first :doc:`create the mesh <gen_3d_assets>` and :doc:`generate the video <gen_2dhoi>`.
 
-   Text / asset prompt
-           ↓
-   python -m grail.pipelines.gen_terrain / python -m grail.pipelines.gen_3d_assets
-           →  3D object meshes
-           ↓
-   python -m grail.pipelines.gen_2dhoi
-           →  Blender + Kling AI / MiniMax-H3 HOI videos
-           ↓
-   python -m grail.pipelines.recon_4dhoi
-           →  GEM-X native SOMA + MoGe-3 depth + hybrid object trajectories
-           ↓
-   imports/soma-retargeter + G1 MJCF   →  Unitree G1+DEx3 joint trajectories
-           ↓
-   python -m grail.retargeting.manipulation.handoff  →  Reviewed tracking inputs
+1. :doc:`Reconstruct <recon_4dhoi>` the human and object, then inspect the fit against the source video.
+2. :doc:`Retarget <retargeting>` the reviewed motion to the body-only G1 for stairs or the G1 with DEx3 hands for the kettlebell.
+3. :doc:`Train and evaluate <tracking>` a terrain or manipulation policy with the matching scene and motion. Inspect its rollout metrics before exporting a trajectory.
 
 Sim-to-Real Deployment
 ----------------------
@@ -75,8 +77,8 @@ Rendered Egocentric Views
    :align: center
    :width: 100%
 
-Sim-to-Real Deployment
-~~~~~~~~~~~~~~~~~~~~~~
+Real-robot clips
+~~~~~~~~~~~~~~~~
 
 .. list-table::
    :widths: 50 50
@@ -91,56 +93,31 @@ Sim-to-Real Deployment
           :alt: Stair-climbing deployment
           :width: 100%
 
-Bundled Dependencies
---------------------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 25 40 35
-
-   * - Path
-     - Upstream
-     - Purpose
-   * - ``assets/robots/unitree_g1``
-     - `YanjieZe/GMR <https://github.com/YanjieZe/GMR>`_
-     - G1+DEx3 robot geometry for the SOMA retargeter
-   * - ``imports/GEM-X``, ``imports/soma-retargeter``
-     - `NVlabs/GEM-X <https://github.com/NVlabs/GEM-X>`_ / `NVIDIA SOMA Retargeter <https://github.com/NVIDIA/soma-retargeter>`_
-     - Native SOMA prediction and source-bound SOMA → Unitree G1+DEx3 retargeting
-   * - ``imports/MoSE3``, ``imports/FoundationPose``
-     - `MoSE3 <https://github.com/mose3-tracker/MoSE3>`_ / `NVlabs/FoundationPose <https://github.com/NVlabs/FoundationPose>`_
-     - Hybrid object 6-DOF tracking
-   * - ``imports/MoGe``, ``imports/Hunyuan3D-2.1``
-     - Microsoft, Tencent
-     - MoGe-3 monocular depth + 3D asset generation
-   * - ``imports/Sana``
-     - `NVlabs/Sana <https://github.com/NVlabs/Sana>`_
-     - MiniMax-H3 video generation through Sol-Engine
-   * - ``imports/agentic-retargeter``
-     - Vendored Agentic Retargeter snapshot (plain directory, NVIDIA License)
-     - Agentic robot retargeting, native grasp editing, repair and audits
-
-Initialize with:
-
-.. code-block:: bash
-
-   git submodule update --init --recursive
-
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Getting Started
 
+   requirements
    installation
+   downloads
    quick_start
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   tutorials/stairs
+   tutorials/kettlebell
+   tutorials/own-video
+   results
+
+.. toctree::
    :maxdepth: 2
-   :caption: Pipelines
+   :caption: Pipeline Guides
 
    gen_3d_assets
    gen_2dhoi
    recon_4dhoi
-   agentic_kinematic
    retargeting
    tracking
 
@@ -151,6 +128,16 @@ Initialize with:
    data_export
    visualization
    web_visualizer
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Reference and Support
+
+   outputs
+   configuration
+   troubleshooting
+   manual_installation
+   resources
 
 Indices and tables
 ==================

@@ -1,5 +1,7 @@
 # Robot retargeting
 
+For a hands-on conversion, follow [body-only stairs](tutorials/stairs.md) or [kettlebell with DEx3](tutorials/kettlebell.md). Both start from a reviewed fit. Keep the source frame rate and original object binding through export. Review the robot preview before using its [native NPZ as a tracking input](outputs.md).
+
 Start from a reviewed SOMA03 human and object reconstruction. Set `source_model: soma03` in the case YAML. Bind the source motion, fixed identity, object mesh, support scene, units and timing. GRAIL exports the native 77-joint pose through verified FK to SOMA-base BVH and runs the NVIDIA SOMA retargeter. Select the body-only G1 target or the hand-capable Dex3 target before conversion.
 
 ```bash

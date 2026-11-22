@@ -32,7 +32,6 @@ mathjax3_config = {
     },
 }
 
-sphinxemoji_style = "twemoji"
 
 source_suffix = {
     ".rst": "restructuredtext",
@@ -63,7 +62,7 @@ myst_heading_anchors = 3
 # Single source of truth for the public repo URL. Drives `extlinks` below,
 # the theme's GitHub-backed edit/issue links, so a repo rename only touches this
 # one line.
-# Caveats: the two badge links in index.rst sit inside `raw:: html` blocks
+# Caveats: the project links in index.rst sit inside `raw:: html` blocks
 # and need a manual edit on rename; the `git clone` URL in installation.md
 # lives inside a code fence and must also be edited manually.
 _REPO_URL = "https://github.com/NVlabs/GRAIL"

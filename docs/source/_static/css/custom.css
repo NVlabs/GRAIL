@@ -109,3 +109,33 @@ article img {
         max-width: 100%;
     }
 }
+
+
+/* Keep links readable against the light page background. */
+html[data-theme="light"] {
+    --pst-color-link: #416600;
+    --pst-color-inline-code: #416600;
+}
+
+
+.grail-results {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .75rem;
+    margin-block: 1rem;
+}
+.grail-results a {
+    display: grid;
+    align-content: start;
+    gap: .25rem;
+}
+.grail-results img, .grail-results video {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+    background: #242424;
+}
+.grail-stage-player { width: 100%; height: auto; max-height: 28rem; }
+@media (max-width: 640px) {
+    .grail-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1,5 +1,7 @@
 # 4D HOI Reconstruction
 
+For a complete worked fit, use [stairs](tutorials/stairs.md) for static terrain or [kettlebell](tutorials/kettlebell.md) for a moving object. Bind the source clock, camera and original CAD before reviewing the fit. Check foot contact at the individual support surfaces or hand contact on the moving handle.
+
 Recovers native SOMA03 body/hand motion and a 6-DoF object trajectory from a
 generated or captured RGB video. New prediction and reconstruction default to
 GEM-X native77 with SOMA-X 0.3.3.
@@ -173,4 +175,11 @@ python -m grail.pipelines.recon_4dhoi \
     --results_dir results \
     --job_chunk_idx <i> \
     --num_job_chunks <N>
+```
+
+
+```{toctree}
+:maxdepth: 1
+
+agentic_kinematic
 ```
