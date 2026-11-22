@@ -1,8 +1,8 @@
-# Staged HOI fitting and placement
+# Staged HOI Fitting and Placement
 
 Fit native human and object motion to the source video using the original
 geometry and frame timing. The default predictor is GEM-X native77 with
-SOMA-X 0.3.3. See [installation](installation.md) and
+SOMA-X 0.3.3. See [GRAIL Installation Guide](installation.md) and
 [reconstruction backends](recon_4dhoi.md) for setup and observation inputs.
 
 ## Stage boundaries
@@ -39,7 +39,9 @@ When the evidence supports only `no_contact` / `unknown` contact phases,
 requires reviewed source/oblique evidence and full Stage 2 without fabricated
 attraction targets.
 
-## Run the staged native tools
+## Native fitting tools
+
+<span id="run-the-staged-native-tools"></span>
 
 Prepare the case JSON and input inventory described below.
 Case paths resolve relative to their declaring file. Review annotations must
@@ -65,10 +67,10 @@ bind the actual source, model topology and original object geometry.
 }
 ```
 
-`optimization_config` is a copy of `configs/recon_4dhoi/manip_soma.yaml`
-(or the locomotion configuration with its finite support manifest) with the case's measured ground
-plane filled in; the shipped YAML leaves `plane: null` on purpose and fitting
-fails until a plane with its provenance is supplied.
+Choose `optimization_config` for the interaction:
+
+- **Manipulation:** copy `configs/recon_4dhoi/manip_soma.yaml`. Set `loss_cfg.human_foot_ground.plane` under both `init_opt` and `contact_opt` in `optimization.opt_stage_specs`. Record the measured plane and how it was obtained.
+- **Locomotion:** use the locomotion configuration and supply the reviewed finite-surface support manifest. For stairs, it binds each stance interval to the original floor or tread and its boundaries.
 
 `inventory.json` uses `"schema": "grail.cached_fitting_inputs.v1"` and records
 `sequence`, `frame_count`, `fps`, `original_object_scale`, the placement events
@@ -86,19 +88,24 @@ MoSE3 + FoundationPose object poses). Stage 2 additionally needs the reviewed
 helper that assembles this inventory from a `recon_4dhoi` results directory;
 write it once per case and keep it with the case outputs.
 
+For the released kettle, the right-hand approach entry under `hands.right_hand` starts with `{"id":"approach","frames":[0,33],"state":"no_contact","regions":[]}` (excerpt). It covers frames 0 through 32. The next two frames were marked `unknown`. The full map also records the source-video and topology hashes, contact evidence and the other hand. Build these intervals from your own clip.
+
+With the case inventory and measured support bound, start Stage 1 from the configured GRAIL environment. Choose an unused output path:
+
 ```bash
-python -m grail.agentic_kinematic.hoi_stages stage1 \
-  --case case.json --output runs/case/stage1
+CASE=/workspace/runs/my-lift
+python -m grail.agentic_kinematic.hoi_stages stage1 --case "$CASE/case.json" --output "$CASE/stage1"
+```
 
-# Author source-specific contacts, inspect Stage 1 and execute reviewed placement.
-python -m grail.agentic_kinematic.hoi_placement --help
+After Stage 1 and placement review, point Stage 2 at the exact selected parent described in the placement decision. A reviewed unchanged placement can select the original Stage 1 fit when supported by that decision. The following argument pattern uses a case whose reviewed placement produced `placement/stage1_object_refined.pkl`; substitute the actual parent and choose a fresh output.
 
-# For the moving-object route, consume that exact placement parent.
+```bash
+CASE=/workspace/runs/my-lift
 python -m grail.agentic_kinematic.hoi_stages stage2 \
-  --case case.json --stage1-dir runs/case/stage1 \
-  --parent runs/case/placement/stage1_object_refined.pkl \
-  --contact-map case/contact_map.json --contact-temporal case/contact_temporal.json \
-  --output runs/case/stage2
+  --case "$CASE/case.json" --stage1-dir "$CASE/stage1" \
+  --parent "$CASE/placement/stage1_object_refined.pkl" \
+  --contact-map "$CASE/contact_map.json" --contact-temporal "$CASE/contact_temporal.json" \
+  --output "$CASE/stage2-reviewed"
 ```
 
 Stage 1 accepts new contact annotations later; Stage 2 validates its selected
@@ -108,6 +115,8 @@ checks for SOMA03. Arbitrary display-mesh changes
 are not converted into native body parameters.
 
 
-## Retarget a reviewed motion
+## Retargeting
+
+<span id="retarget-a-reviewed-motion"></span>
 
 Pass the selected native human/object result, source clock, identity, object CAD and support scene to the [robot retargeting workflow](retargeting.md).

@@ -1,4 +1,4 @@
-# Citation, licences and support
+# Citation, Licences and Support
 
 **Cite GRAIL.** Use the paper *GRAIL: Generating Humanoid Loco-Manipulation from World Models*, published at CoRL 2026. The repository provides a ready-to-copy {blob}`BibTeX entry <README.md#citation>`. [Read the paper](https://arxiv.org/abs/2606.05160).
 
@@ -6,6 +6,10 @@
 
 **Get help.** Check [Troubleshooting](troubleshooting.md) for installation, geometry and evaluation errors. For a reproducible bug, open a [GRAIL issue](https://github.com/NVlabs/GRAIL/issues) with the example name, image tag, GPU and driver, failing stage, command and first error. Include a short log excerpt and the expected output.
 
-## Components used by the examples
+## Bundled components
 
-GEM-X predicts the human pose and SOMA represents the body. MoGe estimates depth; MoSE3 and FoundationPose track moving objects. The SOMA retargeter converts the reviewed motion to G1, and SONIC trains the tracking policy. Optional scene-generation components include Hunyuan3D and Sana. [Installation](installation.md) initializes the pinned dependencies.
+<span id="components-used-by-the-examples"></span>
+
+GEM-X predicts the human pose and SOMA represents the body. MoGe estimates depth; MoSE3 and FoundationPose track moving objects. The SOMA retargeter converts the reviewed motion to G1, and SONIC trains the tracking policy. Optional scene-generation components include Hunyuan3D and Sana. [GRAIL Installation Guide](installation.md) initializes the pinned dependencies.
+
+For a source checkout, [initialize submodules and hydrate LFS](installation.md). FoundationPose supplies model-based pose refinement, GEM-X supplies the human predictor and MoGe supplies depth. Hunyuan3D produces optional textured assets. Sana provides the optional MiniMax service implementation. The unified SONIC code is vendored. The robot model and its licence files live under `assets/robots/unitree_g1/`.

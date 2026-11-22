@@ -1,79 +1,50 @@
 # Web Visualizer
 
-Generate a self-contained static site that lets anyone browse a GRAIL motion
-library in a web browser — hover to play the MP4 preview, per-motion
-metadata panel, client-side name filter, dark/light mode.
+<span id="browse-a-motion-library"></span>
 
-No server-side code, no WebGL, no shader setup. It's just HTML + JS + a
-manifest JSON alongside kinematic-replay MP4s in `<motion_lib>/vis/` and
-meta pickles from retarget / data-export.
+You can compare a preview in your browser without running Isaac Sim. The web viewer pairs `robot/<name>.pkl` with `vis/<name>.mp4`. Pick the video that answers your question: a kinematic retargeting preview shows the commanded motion; a policy evaluation shows what the simulated robot did.
 
-## Generate
+<span id="generate"></span>
 
-Render kinematic-replay MP4s into `<motion_lib>/vis/` first (if not already
-present):
+## Gallery generation
 
-```bash
-conda activate sonic    # or GRAIL_SONIC_ENV override
-bash grail/visualization/scripts/visualize.sh data/pickup_table
-```
+<span id="build-a-gallery-for-the-stair-reference"></span>
 
-Then build the static site:
+Complete the [stairs tutorial](tutorials/stairs.md) through the terrain pack. In the `grail` container environment, use a fresh gallery directory. This keeps the original packed library intact and adds a copy of the G1 kinematic preview under the motion's own name.
 
 ```bash
-python -m grail.web_visualizer.generate_manifest \
-    --motion_lib data/pickup_table \
-    --output     out/viz/pickup_table
+LIB=/workspace/runs/guides/stairs-preview
+mkdir -p "$LIB/vis"
+ln -s /workspace/runs/stairs/terrain/robot "$LIB/robot"
+cp /workspace/runs/stairs/retargeting.mp4 "$LIB/vis/stairs.mp4"
+python -m grail.web_visualizer.generate_manifest --motion_lib "$LIB" \
+  --output /workspace/runs/guides/browser --copy_videos
 ```
 
-Outputs:
+<span id="what-the-manifest-contains"></span>
 
-```
-out/viz/pickup_table/
-├── index.html
-├── main.js
-├── style.css
-├── manifest.json            # 41 motions, 41 with video (example)
-└── vis/                     # relative symlinks into motion_lib/vis/
-    ├── pickup_table__apple_0__000.mp4
-    └── ...
-```
+In the standard image this took under one second on an i9-14900K. The manifest reported **1 motion, 241 frames, 1 video**. The portable site contains `index.html`, `main.js`, `style.css`, `manifest.json` and `vis/stairs.mp4`.
 
-The `vis/` entries are relative symlinks by default — fast + space-efficient.
-Pass `--copy_videos` if you need a self-contained directory (e.g. publishing
-to S3).
+<span id="serve"></span>
 
-## Serve
+## Local gallery server
 
-Any static-file host works. For a quick local check:
+<span id="open-it-on-your-workstation"></span>
+
+If your container follows the installation guide, open a host terminal at the checkout root and serve the output through the host's loopback interface.
 
 ```bash
-cd out/viz/pickup_table
-python -m http.server 8000
-# open http://localhost:8000/
+python3 -m http.server 8000 --bind 127.0.0.1 --directory ../grail-demo/runs/guides/browser
 ```
 
-To publish on GitHub Pages, host from a dedicated branch or drop the output
-into a path the Pages workflow picks up.
+<span id="what-the-viewer-does"></span>
 
-## What the manifest contains
+Open `http://127.0.0.1:8000/` on that workstation and hover over the stairs card. Stop the server with Ctrl-C. If the card has no clip, look at `num_with_video` in `manifest.json` and check the MP4 stem against the robot PKL. If the page looks empty when double-clicked, open it through the HTTP server so the browser can fetch the manifest.
 
-A stable-allowlist projection from the motion library:
+## Gallery manifest and sharing
 
-| Field        | Source                             | Notes                                   |
-|--------------|------------------------------------|-----------------------------------------|
-| `name`       | filename stem of `robot/*.pkl`     |                                         |
-| `frames`     | robot pkl (joint_pos / body_pos)   | number of frames                          |
-| `video`      | `vis/*.mp4`                        | omitted if video missing                |
-| `meta.*`     | `meta/*.pkl` (allowlisted keys)    | `object_name`, `table_{pos,quat,size}`  |
+<span id="inspect-the-manifest-and-share-the-gallery"></span>
 
-Only the allowlisted meta keys are copied into the manifest so the schema
-stays stable even as `meta/*.pkl` grows new fields.
+The generator uses the robot PKL stem as the motion name. It reads the frame count from the trajectory, matches the video by stem under `vis/` and copies allowlisted metadata such as the object name and table pose, quaternion and size. A motion can have a card even when it has no video. Compare the motion and video counts before sharing.
 
-## What the viewer does
-
-- Renders a grid of cards, responsive down to mobile width.
-- Hover-to-play / mouseleave-to-pause. No autoplay, no audio.
-- Type-to-filter: `search` box performs a case-insensitive substring match
-  against motion names (client-side, instant).
-- Dark mode honours `prefers-color-scheme`; no theme switch widget.
+By default the local gallery uses relative video symlinks. Choose `--copy_videos` as in the example above for a self-contained site. Serve the entire output including its manifest, JavaScript, CSS and media. The viewer searches motion names by case-insensitive substring, plays muted clips on hover and follows the browser’s color preference.

@@ -1,4 +1,4 @@
-# Example results
+# Example Results
 
 Follow each case from the source video to simulated motion. Select a stage to see its files, measurements and runtime. The source column plays the bundled input. The human and G1 columns come from the tutorial in `nvgrail/grail:1.2.0` on one 48 GB RTX 6000 Ada. The tracking column comes from a 5,000-update run in production image `nvgrail/grail:1.1.0` on one L40S. Its human fit and robot trajectory were generated independently.
 
@@ -11,7 +11,11 @@ Follow each case from the source video to simulated motion. Select a stage to se
 <a href="tutorials/stairs.html#stairs-track-result"><img src="_static/examples/stairs-tracking.jpg" alt="Simulated G1 ascending the staircase at update 5,000"><span>Tracked rollout</span></a>
 </div>
 
-The tracked still is one full frame from a second evaluation of the 5,000-update stair policy, recorded with a following camera. The trainer writes checkpoint metrics at each interval.
+The tracked still is from a second evaluation of the 5,000-update stair policy. The diagnostic below shows the same complete recording with its following camera: one L40S, driver 580.95.05, `nvgrail/grail:1.1.0`, one environment, 500 frames at 50 fps. The [recorder command](tracking.md#stair-policy-rollout) runs separately from the trainer's checkpoint metrics.
+
+<details><summary>Watch the 10-second stair policy recording</summary>
+<video controls playsinline preload="none" poster="_static/examples/stairs-tracking.jpg" aria-label="Stair policy at update 5,000, following camera"><source src="_static/examples/stairs-policy-diagnostic.mp4" type="video/mp4"></video>
+</details>
 
 ## Kettlebell lift
 
@@ -67,7 +71,7 @@ This fit used 400 iterations. Across 536 labelled heel/toe frame samples the abs
 
 8 min 43 s on an RTX 6000 Ada (48 GB) in `nvgrail/grail:1.2.0`, including review and preview creation. The comparison contains 241 frames at 24 fps.
 
-The selected native body-only motion contains **241 × 36** finite pose values at 24 fps. The original stair mesh was preserved. Over 536 labelled stance samples, median absolute in-patch sole error was **1.79 mm** (95th percentile **8.55 mm**). The review retained unresolved contacts: 33 samples had no in-patch sole point within 5 mm, the right heel overhung tread 4 by up to 66 mm, and the right toe intersected tread 5 by up to 12.6 mm. The example shows the motion selected for simulation; these measurements do not establish continuous clearance or physical load bearing.
+The selected native stair motion contains **241 × 36** finite pose values at 24 fps. The original stair mesh was preserved. Over 536 labelled stance samples, median absolute in-patch sole error was **1.79 mm** (95th percentile **8.55 mm**). The review retained unresolved contacts: 33 samples had no in-patch sole point within 5 mm, the right heel overhung tread 4 by up to 66 mm, and the right toe intersected tread 5 by up to 12.6 mm. The example shows the motion selected for simulation; these measurements do not establish continuous clearance or physical load bearing.
 
 | File | Observed size |
 |---|---:|

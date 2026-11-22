@@ -1,19 +1,27 @@
-# Lift a kettlebell with G1 and DEx3 hands
+# Kettlebell Lifting with Unitree G1
 
-Reconstruct a person lifting the supplied kettlebell, transfer the grasp to a robot with articulated fingers, then evaluate whether a ContactFirst policy keeps the object on its reference trajectory.
+<span id="lift-a-kettlebell-with-g1-and-articulated-hands"></span>
+
+<span id="lift-a-kettlebell-with-g1-and-dex3-hands"></span>
+
+Reconstruct a person lifting the supplied kettlebell, transfer the grasp to a robot with articulated fingers, then evaluate whether an object-aware manipulation policy keeps the object on its reference trajectory.
 
 ![Frame from the supplied kettlebell manipulation video](../_static/examples/kettlebell.jpg)
 
-## Before you start
+## Prerequisites
 
-Complete [Installation](../installation.md) and [Downloads](../downloads.md). Keep the named container open. Start with `/workspace/runs/kettlebell` unused; the first prompt creates it. The same directory on the host is `../grail-demo/runs/kettlebell`. See the [glossary](../configuration.md) for terms used below.
+<span id="before-you-start"></span>
+
+Complete [GRAIL Installation Guide](../installation.md) and [Downloads](../downloads.md). Keep the named container open. Start with `/workspace/runs/kettlebell` unused; the first prompt creates it. The same directory on the host is `../grail-demo/runs/kettlebell`. See the [glossary](../configuration.md) for terms used below.
 
 **If an agent step stops or you reject its result**, keep the partial output and pick a fresh name such as `kettlebell-2`. For a clean repeat, change the run directory in **three places**: the reconstruction prompt, the retargeting prompt and the tracking block’s `CASE=` assignment. Keep the original example input path and motion key. Tell the agent which frame failed, what you saw and which scene or contact binding to correct. If only retargeting failed, leave the reviewed fit where it is. Change only the output directory in the retargeting prompt and set `CASE` to that directory in the tracking step.
 
 With the model weights cached, budget about 15–20 minutes for a repeat fit and 10–15 minutes for G1 on the 48 GB RTX 6000 Ada. These are planning estimates from comparable runs. Review time and available GPU memory can extend them.
 
 (kettlebell-fit-step)=
-## 1. Reconstruct the human and object
+## 1. HOI reconstruction
+
+<span id="reconstruct-the-human-and-object"></span>
 
 **Host terminal, from the checkout root.** The Codex CLI reads the repository skill and runs the fitting tools in the GPU container. Use the original object geometry and review the hand and handle before, during and after contact. The fit and review took 17 min 07 s on a 48 GB RTX 6000 Ada with the depth weights cached.
 
@@ -45,15 +53,18 @@ Open `reconstruction.mp4` and `contact_map.json`. Watch the hands close before t
 
 {ref}`Run measurements and file sizes <kettlebell-recon-details>`.
 
-## 2. Retarget the reviewed fit to G1
+(kettlebell-retarget-step)=
+## 2. G1 retargeting
 
-**Same host terminal.** This converts the selected human and object motion to the 43-joint G1 with DEx3 hands. Conversion and review took 13 min 56 s on the same workstation.
+<span id="retarget-the-reviewed-fit-to-g1"></span>
+
+**Same host terminal.** This converts the selected human and object motion to the 43-joint G1 with articulated hands. Conversion and review took 13 min 56 s on the same workstation.
 
 ```bash
 codex exec --approve-for-me -m gpt-6.2-sol \
   "Use the grail-agentic-retargeting skill in the grail-demo container on the
-selected fit in /workspace/runs/kettlebell. Retarget to Unitree G1 with DEx3
-hands. Keep the original object mesh and scene binding. For source_python use the
+selected fit in /workspace/runs/kettlebell. Retarget to Unitree G1 with seven finger joints per hand
+for manipulation. Keep the original object mesh and scene binding. For source_python use the
 grail environment and for the robot solver use imports/soma-retargeter/.venv.
 Save robot.npz, retargeting.mp4 and the review under /workspace/runs/kettlebell.
 Run all tools in the container using only this checkout, its downloads and this
@@ -80,9 +91,12 @@ python -c "import numpy as np; print(np.load('/workspace/runs/kettlebell/robot.n
 
 {ref}`Run measurements and file sizes <kettlebell-robot-details>`.
 
-## 3. Train and evaluate a tracking policy
+(kettlebell-tracking-step)=
+## 3. Task-general tracking
 
-**Container shell, from `/workspace/grail`.** Build the handoff from the original robot motion and reviewed contact map. The launcher packs the handoff, loads the ContactFirst warm-start actor and frozen decoder, and evaluates without the RTX video renderer. Use the licence settings reviewed in [Tracking weights](../downloads.md#tracking-weights). The short run below uses 64 environments and four PPO updates, saves a checkpoint, and evaluates it. This took 2 min 20 s on the RTX 6000 Ada, including simulator startup.
+<span id="train-and-evaluate-a-tracking-policy"></span>
+
+**Container shell, from `/workspace/grail`.** Build the handoff from the original robot motion and reviewed contact map. The launcher packs the handoff, loads the manipulation actor warm-start actor and frozen decoder, and evaluates without the RTX video renderer. Use the licence settings reviewed in [Tracking weights](../downloads.md#tracking-weights). The short run below uses 64 environments and four PPO updates, saves a checkpoint, and evaluates it. This took 2 min 20 s on the RTX 6000 Ada, including simulator startup.
 
 If you retried only retargeting, use the new `CASE` for the robot and handoff. In the handoff command below, pass the map from the reviewed fit, for example `--contact-map /workspace/runs/kettlebell/contact_map.json`.
 

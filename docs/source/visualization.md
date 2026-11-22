@@ -1,218 +1,119 @@
 # Data Visualization
 
-Render kinematic-replay MP4s of any GRAIL motion-library directory — works
-on the retargeting output, the data-export process, and the public-release
-layout. Single IsaacSim session per batch, so an N-motion render is much
-faster than spawning a full training process per clip.
+<span id="inspect-a-reconstruction-or-robot-motion"></span>
 
-The visualization subpackage lives at
-{src}`grail/visualization/`.
-Two CLI wrappers cover the common cases:
+Choose the artifact that answers the question. The native geometry can show whether the human touches the handle, the kinematic G1 preview shows the commanded robot trajectory, and a [tracked rollout](tracking.md#stair-policy-rollout) shows what the simulated policy achieved.
 
-| Script | Use case |
-|---|---|
-| {blob}`scripts/visualize.sh <grail/visualization/scripts/visualize.sh>` | Batch — render every motion in a library |
-| {blob}`scripts/visualize_single.sh <grail/visualization/scripts/visualize_single.sh>` | Render one motion from its `robot/<seq>.pkl` |
+<span id="native-soma-g1-dex3-scene-replay"></span>
 
-Underneath, both call the same two Python modules:
-`grail.visualization.prepare_vis_shard` (motion-lib → trajectory shard) and
-`grail.visualization.batch_render_replay` (single IsaacSim session, one MP4
-per motion).
+## Human and object replay
 
-## Native SOMA G1+DEx3 scene replay
+<span id="replay-the-fitted-person-and-object"></span>
 
-Default SOMA retargeting first emits a 50-column G1+DEx3 CSV rather than the
-packaged motion-library layout described below. Inspect that intermediate result
-with the source-bound target and the same validated `hoi_data.pkl`:
+Use the **selected human geometry**, including animated human and object vertices, their face arrays and the calibrated source camera. Ask the reconstruction agent to deliver `selected_fit_geometry.npz` with the selected native fit, or supply the actual companion path it reported. The video or `robot.npz` alone cannot recreate these meshes. Use the same original Blender room that conditioned the clip. Both released examples used {blob}`data/Scene/indoor1.blend`; fetch the hydrated 331.4 MiB file if missing. For a different capture, use its own calibrated room and frame rate.
+
+From the checkout root of the release container, render the kettlebell at the start, middle and end:
 
 ```bash
-export DISPLAY=:1
-RETARGET_DIR=<retarget_output_directory>
-
-imports/soma-retargeter/.venv/bin/python -m grail.retargeting.soma_replay \
-    "$RETARGET_DIR/g1_retarget/csv/source.csv" \
-    <path/to/hoi_data.pkl> \
-    "$RETARGET_DIR/g1_dex3_target" \
-    "$RETARGET_DIR/g1_dex3_scene.mp4"
+imports/blender/blender --background --disable-autoexec --threads 8 \
+  --python-exit-code 1 --python grail/visualization/hoi_blender_scene.py -- \
+  --geometry /workspace/runs/kettlebell/selected_fit_geometry.npz \
+  --background-scene data/Scene/indoor1.blend \
+  --output-dir /workspace/runs/guides/kettlebell-replay \
+  --fps 24 --model-label SOMA03 --quality-status UNREVIEWED \
+  --frames 0,60,120 --render-percent 25
 ```
 
-This renderer refuses 29-joint/padded CSVs. It loads all 43 native robot joints,
-the reconstructed object mesh and scale, and the per-frame object trajectory.
-For visualization it creates a `2.0 x 0.6 x 0.04 m` tabletop with four legs,
-centered below the initial object pose and placed at the scaled/rotated mesh's
-minimum height. Use `--table-size WIDTH DEPTH THICKNESS` to override the
-dimensions. It is a kinematic geometry/alignment review, not a physics or
-grasp-success test. Once a motion is accepted and packaged into `robot/`,
-`objects/`, and `object_usd/`, use the IsaacLab batch renderer below.
+In `nvgrail/grail:1.2.0` on an i9-14900K with no GPU passed to Docker, this took 21 seconds. Expect a roughly 335 MiB `stage2_native_replay.blend`, six PNGs and `replay_verification.json`. The file reopened with all 121 frames; maximum source projection error was 0.00052 px. Frame 0 of the video corresponds to Blender frame 1. Small projection error checks the replay, while visual inspection checks the fit. If the overlay misses the source, verify the original room and camera before adjusting geometry.
+
+![Same kettlebell fit at frame 60 from the source camera and an oblique view.](_static/examples/fit-replay-kettlebell.jpg)
+
+Source camera at left, oblique at right. These are two of the six stills produced by the command above.
+
+For stairs, the same Blender command ran with `/workspace/runs/stairs/selected_fit_geometry.npz`, a fresh `/workspace/runs/guides/stairs-blend` directory and `--frames 0,120,240`. It wrote six PNGs and a 336 MiB Blender scene in 27 seconds on the same CPU. Reopening it checked 241 frames with a maximum projection error of 0.0012 px. If geometry or the original room is unavailable, the reconstruction's saved comparison MP4 can still be viewed directly.
+
+
+<span id="under-the-hood"></span>
 
 ## Input layout
 
-The visualizer expects any directory shaped like:
+<span id="prepare-a-packed-robot-motion-for-replay"></span>
 
-```
-<motion_lib>/
-├── robot/<seq>.pkl       required
-├── objects/<seq>.pkl     required
-├── object_usd/<seq>.usd  required
-└── meta/<seq>.pkl        optional (used for table_pos when present)
-```
-
-Three layouts in the wild all satisfy this:
-
-| Layout | Producer | Quat convention | Hand DOFs |
-|---|---|---|---|
-| `data/motion_lib/<name>/` | archived SMPL-X/GMR motion libraries | **wxyz** | none |
-| `logs_rl/<exp>/exported/step_*/shard_*/` | data-export pipeline (`grail.data_export.export_successful_rollouts`) | **xyzw** | `hand_dof_pos: (T, 14)` |
-| `data/<name>/` | released dataset | **xyzw** | inherited from exported data |
-
-Differences between the three are handled by flags on `visualize.sh` — see
-[Quaternion convention](#quaternion-convention) and
-[Hand DOFs](#hand-dofs).
-
-## Output layout
-
-Everything lands under `<motion_lib>/vis/` (kept separate from the release
-`<motion_lib>/video/` which carries the original 2D HOI render, and from
-the retarget `<motion_lib>/videos/` written by older pipelines):
-
-```
-<motion_lib>/vis/
-├── <seq>.mp4                    one per motion
-├── all_motions_combined.mp4     concat (only when --max_videos > 0)
-└── examples_grid.mp4            4×4 or 2×2 grid (only when --max_videos > 0)
-```
-
-## Batch render
-
-```bash
-conda activate sonic    # or set $GRAIL_SONIC_ENV
-export DISPLAY=:1
-
-# Retargeting output — root_rot is wxyz, must override
-QUAT_CONVENTION=wxyz bash grail/visualization/scripts/visualize.sh \
-    data/motion_lib/pickup_table
-
-# Data-export dir — defaults match (xyzw)
-bash grail/visualization/scripts/visualize.sh \
-    logs_rl/<exp>/exported/step_010000/shard_0
-
-# Public-release dir — defaults match (xyzw)
-bash grail/visualization/scripts/visualize.sh \
-    data/pickup_table
-```
-
-Positional arguments (all but the first are optional):
-
-```
-visualize.sh <motion_lib_path> [max_videos] [cam_offset_x,y,z] [quat_convention]
-```
-
-| Arg | Default | Notes |
-|---|---|---|
-| `motion_lib_path` | — | Full path (absolute or repo-relative) to the motion library. |
-| `max_videos` | `16` | Cap on number of motions rendered. Pass `0` to render all motions; `0` also skips the post-processing concat / grid. |
-| `cam_offset` | `1.5,-1.5,1.0` | Camera position relative to the motion centroid. Comma-separated, no spaces. |
-| `quat_convention` | `xyzw` | One of `auto`, `wxyz`, `xyzw`. See [Quaternion convention](#quaternion-convention). |
-
-Env-var fallbacks: `QUAT_CONVENTION` (default `xyzw`).
-
-## Single-motion render
-
-```bash
-bash grail/visualization/scripts/visualize_single.sh \
-    data/pickup_table/robot/pickup_table__apple_0__000.pkl
-```
-
-Takes the full path to a `robot/<seq>.pkl` and writes
-`<motion_lib>/vis/<seq>.mp4`. Useful for spot-checking a single clip without
-re-rendering the whole library.
-
-```
-visualize_single.sh <robot_pkl_path> [cam_offset_x,y,z] [quat_convention]
-```
-
-## Quaternion convention
-
-`root_rot` is stored in two different conventions across the codebase:
-
-- Archived G1 motion-library files can use **wxyz**.
-- {blob}`grail/data_export/export_successful_rollouts.py` writes **xyzw**.
-
-The renderer expects wxyz, so `prepare_vis_shard.py` canonicalizes before
-passing data downstream. Pick the right setting via `--quat_convention`
-(CLI) or `QUAT_CONVENTION` (env var):
-
-| Value | Behavior | Use for |
-|---|---|---|
-| `xyzw` *(default)* | Always swap `[x,y,z,w] → [w,x,y,z]` before rendering | data-export dir + public-release dirs |
-| `wxyz` | No-op pass-through | retargeting output (`data/motion_lib/<name>/`) |
-| `auto` | Magnitude-based detection: whichever of slot 0 / slot 3 carries more energy is taken to be the scalar `w` | Mixed corpora; **not robust** to motions that don't start near-upright (e.g. backward-leaning) |
-
-`prepare_vis_shard.py` prints a per-batch summary line:
-
-```
-quat conventions (root_rot): wxyz=0 xyzw=16
-```
-
-so you can confirm the choice from the log.
-
-## Hand DOFs
-
-The gripper renders from `hand_dof_pos: (T, 14)` in the input `robot/<seq>.pkl`
-when present, otherwise the renderer zero-pads the missing 14 DOFs, so the gripper stays in its open pose.
-
-Status appears in the Step-1 log:
-
-```
-hand DOFs from hand_dof_pos: 16 / 16
-```
-
-## Under the hood
-
-`visualize.sh` runs in three logical steps:
-
-```
-1. prepare_vis_shard.py   motion_lib/{robot,objects,meta} → /tmp/vis_shard_<key>/
-                          (per-motion trajectory.pkl + synthetic metrics_eval.json)
-2. batch_render_replay.py one IsaacSim session, hot-swap object USDs between motions
-                          → <motion_lib>/vis/<seq>.mp4
-3. (optional) ffmpeg      add per-clip labels, concat into all_motions_combined.mp4,
-                          build 4×4 (or 2×2 if fewer than 16) examples_grid.mp4
-```
-
-Step 2 also handles MuJoCo → IsaacLab DOF reordering for the 29 G1 body
-joints and pads to 43 DOFs (zero-fill) when `hand_dof_pos` is absent.
-
-You can call the Python modules directly if you want to script around the
-shell wrapper:
+A terrain library pairs `robot/stairs.pkl` with `objects/stairs.pkl` and `object_usd/stairs.usd`. In the `grail` environment, convert the packed [stairs example](tutorials/stairs.md) to the renderer's trajectory format:
 
 ```bash
 python -m grail.visualization.prepare_vis_shard \
-    --data_dir <motion_lib> --shard_dir /tmp/shard --max_motions 16 \
-    --quat_convention xyzw
-
-python -u -m grail.visualization.batch_render_replay \
-    --shard_dir /tmp/shard --traj_dir /tmp/shard/trajectories \
-    --object_usd_dir <motion_lib>/object_usd \
-    --output_dir <motion_lib>/vis \
-    --camera_offset 1.5 -1.5 1.0 --camera_target 0.0 0.0 0.8 \
-    --skip_existing --headless
+  --data_dir /workspace/runs/stairs/terrain \
+  --shard_dir /workspace/runs/guides/replay --quat_convention xyzw
 ```
 
-## Following up with the web visualizer
+<span id="output-layout"></span>
+<span id="following-up-with-the-web-visualizer"></span>
 
-`<motion_lib>/vis/*.mp4` is exactly the input the
-[web visualizer](web_visualizer.md) consumes for hover-to-play previews —
-generate `vis/` first, then point `grail.web_visualizer.generate_manifest`
-at the same motion library.
+On the same CPU this took under a second. Look for `trajectories/stairs.trajectory.pkl`. The accompanying `metrics_eval.json` indexes a **kinematic** replay. To judge a policy, use [tracking evaluation](tracking.md). To browse an existing MP4 without a renderer, [make a static gallery](web_visualizer.md).
 
-## Troubleshooting
+## Single-motion render
 
-| Symptom | Likely cause / fix |
-|---|---|
-| Robot is rotated horizontally / lying on its side | Wrong `quat_convention`. Retarget pkls are `wxyz`; data-export and release pkls are `xyzw`. Match it explicitly instead of relying on `auto`. |
-| Gripper stays open even at the grasp moment | `robot/<seq>.pkl` lacks `hand_dof_pos`. Export the hand joint positions with the robot motion. |
-| `Error: required subdir missing: <path>/object_usd` | The directory isn't a motion-library layout. Verify `robot/`, `objects/`, `object_usd/` all exist; `meta/` is optional. |
-| `[DOF] Padding 29-DOF trajectories to 43-DOF articulation` printed and the gripper looks open | Expected when `hand_dof_pos` is absent — the renderer pads with zeros (= open pose). Not an error. |
-| Render hangs on first motion | IsaacSim init failed silently. Confirm `DISPLAY` is set and the `sonic` env activated. The renderer has a 180 s watchdog that force-exits if no per-frame heartbeat fires, so stalls do eventually self-terminate. |
-| Black mujoco viewer / `glfwInit failed` | `export DISPLAY=:1` **before** activating conda (same as retargeting — `DISPLAY` is an env var, not a conda setting). |
+<span id="render-a-packed-motion"></span>
+
+**Isaac Sim, single motion.** With a hydrated robot USD, the repository wrapper prepares the trajectory and calls `grail.visualization.batch_render_replay`. From the checkout root in the configured container, select the robot PKL in the library you want to render:
+
+```bash
+# Pick an unused replay directory.
+REPLAY=/workspace/runs/guides/stairs-isaac-replay
+export GRAIL_ROBOT_USD="$PWD/imports/SONIC/gear_sonic/data/robots/g1/g1_43dof_s3.usda"
+mkdir -p /workspace/runs/guides
+mkdir "$REPLAY" && cp -a /workspace/runs/stairs/terrain/. "$REPLAY/" && \
+  bash grail/visualization/scripts/visualize_single.sh "$REPLAY/robot/stairs.pkl" 1.5,-1.5,1.0 xyzw
+```
+
+
+<span id="hand-dofs"></span>
+<span id="troubleshooting"></span>
+
+On a working RTX renderer the wrapper writes `$REPLAY/vis/stairs.mp4` inside the copy. The original tutorial pack remains available for training. On the RTX 6000 Ada with driver 595.99.02, trajectory preparation passed, then Isaac exited during renderer startup after eight seconds, before writing video. If the asset check fails earlier, hydrate the robot USD. The {blob}`batch wrapper <grail/visualization/scripts/visualize.sh>` accepts a whole library. For manipulation, preserve recorded finger DOFs; older exports without them play with an open gripper.
+
+**Unitree G1 on static terrain, software rendering.** This alternative reads the 29 joint angles and root pose from the packed robot PKL and the original fixed collider from the packed USD. In the release container at the checkout root:
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate sonic
+export PYTHONPATH="$PWD/imports/SONIC:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+MODEL=imports/soma-retargeter/soma_retargeter/assets/robotics/unitree/g1/desc/mjcf/g1_29dof_rev_1_0.xml
+MUJOCO_GL=egl EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 python scripts/standalone/replay_terrain.py \
+  /workspace/runs/stairs/terrain stairs "$MODEL" /workspace/runs/guides/stairs-reference.mp4
+```
+
+This produced the fixed-camera clip below in 47 seconds on the i9-14900K with no GPU exposed to `nvgrail/grail:1.2.0`. It plays all 241 reference poses at 24 fps. See [the policy recording](results.md#stair-climb) to compare with simulated motion. For a moving object with articulated hand tracking, use the native retargeting preview or the Isaac renderer on a compatible host.
+
+<video controls playsinline preload="none" poster="_static/examples/stairs-reference.jpg" aria-label="Fixed-view packed G1 stair reference, 241 frames"><source src="_static/examples/stairs-reference.mp4" type="video/mp4"></video>
+
+## Quaternion convention
+
+For this terrain pack, the robot's `root_rot` is **x, y, z, w**. Its object's `root_quat` is **w, x, y, z**. The native NPZ stores the free-joint quaternion **w, x, y, z**. The shard converter's option selects the library's **robot** convention. A rotated or flipped character is a reason to check that field before changing the camera. [Outputs and coordinates](outputs.md) gives the measurements for both examples.
+
+## Batch render
+
+<span id="render-a-whole-motion-library"></span>
+
+On a host with a working Isaac renderer, select a writable motion library with matching `robot/<key>.pkl`, `objects/<key>.pkl` and `object_usd/<key>.usd`. An optional `meta/<key>.pkl` can supply the table pose. In the SONIC environment at the checkout root:
+
+```bash
+bash grail/visualization/scripts/visualize.sh "$LIB" 16 1.5,-1.5,1.0 xyzw
+```
+
+The arguments are the library, maximum motions, camera offset and robot quaternion order. The default is 16 motions. Use 0 for all motions without the concatenated video or grid. Output lives in `vis/`, apart from the original input videos. With post-processing enabled, look for `all_motions_combined.mp4` and `examples_grid.mp4` as well as the individual clips. The single-motion wrapper accepts a robot PKL, camera offset and quaternion convention.
+
+For a release or successful-rollout export the usual robot order is `xyzw`. Choose `wxyz` for a library known to use scalar-first robot rotations. The optional `auto` heuristic compares components and can choose incorrectly on a tilted robot. Inspect the converter’s convention counts. Recorded `hand_dof_pos` has 14 channels. If absent, the renderer fills the missing joints with zeros. A visible open hand can therefore indicate missing hand data.
+
+The wrapper prepares a shard of trajectories, reorders body joints for Isaac, renders them in one simulator session and optionally labels/combines the videos with FFmpeg. To inspect or reuse the intermediate shard:
+
+```bash
+python -m grail.visualization.prepare_vis_shard --data_dir "$LIB" --shard_dir "$SHARD" \
+  --max_motions 16 --quat_convention xyzw
+python -m grail.visualization.batch_render_replay --shard_dir "$SHARD" --traj_dir "$SHARD/trajectories" \
+  --object_usd_dir "$LIB/object_usd" --output_dir "$LIB/vis" \
+  --camera_offset 1.5 -1.5 1.0 --camera_target 0.0 0.0 0.8 --skip_existing --headless
+```
+
+Choose a fresh writable `SHARD`. If a video lacks the object, check the USD stem and texture paths. If the robot is flipped, verify quaternion order before tuning the camera. Supply the hydrated robot USD when required. The Isaac wrapper and preparation commands were checked; see the rendering limitation and software alternative above.

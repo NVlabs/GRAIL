@@ -20,7 +20,7 @@ correction policy.
 | --- | --- | --- |
 | `soma03` | Native SOMA03 FK → verified SOMA-base BVH → official NVIDIA soma-retargeter | Bundled `unitree_g1`: 36 qpos / 29 body joints. Custom `unitree_g1_dex3`: 50 qpos / 43 joints, including 14 finger joints |
 
-Choose the robot morphology before conversion. The Dex3 target solves its own hand joints; preserve its native joint order for contact review.
+Choose the robot morphology before conversion. For manipulation, Unitree G1 solves seven joints in each hand. Preserve their native order for contact review.
 
 ## Carry the original support scene
 
@@ -108,7 +108,7 @@ Use Python 3.11+ for the standalone tools; native conversion needs NumPy,
 SciPy and MuJoCo. Use the locked official SOMA retargeter environment, and GRAIL’s SOMA-X 0.3.3 environment for native export. See the pinned [SOMA setup guide](../imports/agentic-retargeter/tools/soma_retargeter/README.md).
 The bridge preserves virtual-environment Python symlinks when executing them.
 
-For the Dex3 target, use the bundled XML and meshes in `assets/robots/unitree_g1`. The standalone SMPL-X route requires a separate legacy installation.
+For the G1 target with articulated hands, use the bundled XML and meshes in `assets/robots/unitree_g1`. The standalone SMPL-X route requires a separate legacy installation.
 
 All options live in one case YAML; CLI flags select only an action, that YAML,
 and a new receipt directory. Paths resolve relative to the YAML. Output
@@ -227,9 +227,9 @@ compatible Agentic Retargeter adapter. These directories resolve relative to
 the case YAML, even though the generated backend JSON lives in a new execution
 directory. Each directory contains an upstream robot-registry manifest and its
 retarget configuration. The selected `backend.robot` must name that actual
-target; GRAIL does not append joints to a body-only CSV.
+target. A CSV for the 29-joint configuration contains no finger trajectories.
 
-Use this route for a G1 + Dex3 target with all 43 scalar joints represented in
+Use this route for a Unitree G1 target with articulated hands with all 43 scalar joints represented in
 the SOMA solve. The original hand-capable model, its full dependency closure,
 joint-name correspondence, hand reference frames, scaler and IK targets must
 be bound by the adapter. Native export must contain all 50 qpos coordinates
@@ -244,8 +244,8 @@ backend:
     - ./targets/g1_dex3
 ```
 
-The original bundled `unitree_g1` remains a distinct body-only target. The current
-pinned adapter supports custom registries, including G1 + Dex3, without a
+The original bundled `unitree_g1` uses 29 body joints. The current
+pinned adapter supports custom registries, including `unitree_g1_dex3`, without a
 standalone-checkout override. An explicitly selected older runtime must fail if
 it lacks this support. Do not claim that configuring a target alone validates its hand mapping
 or contact quality.
@@ -337,7 +337,7 @@ When an upstream HOI contact map is available, reuse its bound object-side regio
 and phase evidence. Verify source/timing, original object topology, scale and
 coordinate conventions; human vertex IDs cannot be copied onto robot geometry.
 Pool the four human long-finger object regions without double-counting overlap,
-then declare separate Dex3 digit members and normalized dense material patches
+then declare the individual robot fingers and normalized dense material patches
 using the current standalone grasp tools. Distinguish eligible contact regions,
 exported material pairs and measured proximity. Authored hypotheses are not
 neural predictions; insufficient member coverage remains a shortfall. Preserve

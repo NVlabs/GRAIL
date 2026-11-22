@@ -29,8 +29,8 @@
 
 ## News
 
-- **[2026-11-20]** 🧩 **Agentic reconstruction and retargeting with SOMA body support** — released the agentic 4D HOI reconstruction and Unitree G1 retargeting workflow on the SOMA body model.
-- **[2026-08-25]** 🎬 **MiniMax-H3 video generation** — added an optional local MiniMax-H3/Sol-Engine backend for the 2D-HOI pipeline. See the [2D-HOI generation guide](https://nvlabs.github.io/GRAIL/gen_2dhoi.html#minimax-h3-provider).
+- **[2026-11-20]** 🧩 **Agentic reconstruction and retargeting with SOMA body support** — released the agent-guided workflow for interaction-aware HOI reconstruction and retargeting to Unitree G1 on the SOMA body model.
+- **[2026-08-25]** 🎬 **MiniMax-H3 video generation** — added an optional local MiniMax-H3/Sol-Engine backend for robot-centric human video generation. See the [video generation guide](https://nvlabs.github.io/GRAIL/gen_2dhoi.html#minimax-h3-provider).
 - **[2026-07-15]** 🤖 **Task-general tracking checkpoints** — released policy checkpoints trained on the released GRAIL data. See the [tracking guide](https://nvlabs.github.io/GRAIL/tracking.html) and [dataset page](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL).
 - **[2026-06-03]** 🎉 **Code release** — released the GRAIL codebase and documentation.
 
@@ -64,12 +64,12 @@
 
 ## Quick Start
 
-Run either bundled video from human reconstruction through Unitree G1 retargeting and motion tracking in simulation. Start with the [GPU and storage requirements](https://nvlabs.github.io/GRAIL/requirements.html), [install the Docker environment](https://nvlabs.github.io/GRAIL/installation.html) and [download the checkpoints](https://nvlabs.github.io/GRAIL/downloads.html).
+Run either bundled video from human reconstruction through Unitree G1 retargeting and task-general tracking in simulation. Start with the [GPU and storage requirements](https://nvlabs.github.io/GRAIL/requirements.html), [install the Docker environment](https://nvlabs.github.io/GRAIL/installation.html) and [download the checkpoints](https://nvlabs.github.io/GRAIL/downloads.html).
 
-- [Climb stairs](https://nvlabs.github.io/GRAIL/tutorials/stairs.html) with the body-only G1 terrain tracker.
-- [Lift a kettlebell](https://nvlabs.github.io/GRAIL/tutorials/kettlebell.html) with DEx3 hands and the ContactFirst policy.
+- [Stair climbing](https://nvlabs.github.io/GRAIL/tutorials/stairs.html) with the scene-aware tracker for terrain traversal.
+- [Kettlebell lifting](https://nvlabs.github.io/GRAIL/tutorials/kettlebell.html) with the object-aware manipulation policy.
 
-The [GRAIL documentation](https://nvlabs.github.io/GRAIL/) includes the pipeline guides, output formats and troubleshooting.
+The [GRAIL documentation site](https://nvlabs.github.io/GRAIL/) includes the pipeline guides, output formats and troubleshooting.
 
 ## TODOs
 

@@ -1,4 +1,6 @@
-# Manual environment setup
+# Manual Installation
+
+<span id="manual-environment-setup"></span>
 
 GRAIL has been developed and tested on Ubuntu 22.04+ with NVIDIA GPUs (A6000, RTX 4090, RTX 5090, RTX 6000 Ada).
 
@@ -146,7 +148,9 @@ The worker and weights default to `.venvs/mose3/bin/python` and
 `imports/MoSE3/ckpt`. The runtime can be overridden with
 `GRAIL_MOSE3_PYTHON`, `GRAIL_MOSE3_ROOT`, and `GRAIL_MOSE3_CHECKPOINT`.
 
-#### SOMA Retargeter (Unitree G1 + DEx3)
+<span id="soma-retargeter-unitree-g1-dex3"></span>
+
+#### SOMA Retargeter (Unitree G1 with articulated hands)
 
 ```bash
 git submodule update --init imports/soma-retargeter
@@ -154,8 +158,8 @@ git lfs pull --include="assets/robots/unitree_g1/meshes/**"
 bash scripts/setup/install_soma_retargeter.sh --python "$(which python)"
 ```
 
-This hydrates the bundled Unitree G1 retarget assets, verifies the pinned G1-with-DEx3 MJCF and its mesh files, and installs the pinned retargeter into
-`imports/soma-retargeter/.venv`. Per-source DEx3 registry bundles are generated
+This hydrates the bundled Unitree G1 retarget assets, verifies the pinned G1 hand model and its mesh files, and installs the pinned retargeter into
+`imports/soma-retargeter/.venv`. Per-source hand-target registry bundles are generated
 at retarget time; no upstream submodule is modified. The upstream runtime requires
 Python 3.12 and pins Newton, Warp, USD, NumPy, and SciPy through its `uv.lock`;
 the helper therefore keeps it isolated from the Python 3.10 GRAIL environment
@@ -194,7 +198,9 @@ conda activate grail  # return to main env
 pip install -e .
 ```
 
-## Prepare Datasets
+## Dataset preparation
+
+<span id="prepare-datasets"></span>
 
 We use [ComAsset](https://huggingface.co/datasets/HyeonwooKim/ComAsset) as our main dataset:
 
@@ -219,7 +225,9 @@ data/
 
 Other supported datasets: [BEHAVE](https://virtualhumans.mpi-inf.mpg.de/behave/), [InterCap](https://intercap.is.tue.mpg.de/), [FullBodyManip](https://github.com/lijiaman/omomo_release), [SAPIEN](https://sapien.ucsd.edu/).
 
-## Download Checkpoints
+## Checkpoints
+
+<span id="download-checkpoints"></span>
 
 ```bash
 bash scripts/setup/download_checkpoints.sh
@@ -236,12 +244,30 @@ export LD_LIBRARY_PATH=$(python -c "import torch; print(torch.__path__[0])")/lib
 
 export OMNI_KIT_ACCEPT_EULA=Yes               # Isaac Sim EULA
 
-# For 2D generation pipeline
-export OPENAI_API_KEY=<your-key>
-export KLING_ACCESS_KEY=<your-key>
-export KLING_SECRET_KEY=<your-key>
+# For video generation, first set the provider credentials in your shell or secret manager.
+export OPENAI_API_KEY
+export KLING_ACCESS_KEY
+export KLING_SECRET_KEY
 
 # Optional cache paths
 export HF_HOME=/path/to/cache/huggingface
 export TORCH_HOME=/path/to/cache/torch
 ```
+
+## Tracking environment installation
+
+<span id="install-from-scratch-or-add-the-tracking-environment"></span>
+
+To override the FoundationPose source used by the MoSE3 hybrid worker, set `GRAIL_FOUNDATIONPOSE_ROOT` as well as the MoSE3 paths above.
+
+For a Linux host environment, the repository provides the {blob}`scratch installer <scripts/setup/install_env_scratch.sh>`. Initialize the submodules and hydrate the robot meshes as in [GRAIL Installation Guide](installation.md). Inspect the installer options and choose a new environment before running it:
+
+```bash
+bash scripts/setup/install_env_scratch.sh --help
+```
+
+The separate {blob}`SONIC installer <scripts/setup/install_env_sonic.sh>` sets up the Isaac Lab training environment. Follow the licence step in [tracking downloads](downloads.md#tracking-weights). For checkpoints and the optional ComAsset dataset use the download scripts described above. The tutorial timings cover the released Docker setup. No new host installation was timed.
+
+Choose `bash scripts/setup/install_env_scratch.sh` for the scripted host install or the component-specific commands above for an existing environment. The top-level Dockerfile is a source-install bootstrap. The [release container](installation.md) already supplies the three Conda environments. The tracking installer is `bash scripts/setup/install_env_sonic.sh`; it requires Isaac Sim and acceptance of its licence.
+
+For a custom depth-worker location, run `scripts/setup/install_moge3.sh` with `--python` set to your GRAIL interpreter and `--venv` set to the new worker directory. Point `GRAIL_MOGE_PYTHON` at the resulting interpreter. The worker shares base PyTorch and isolates the Triton dependencies. Revalidate it after changing base PyTorch. Its setup receipt is `.venvs/moge3/runtime_setup.json`; installation alone does not verify depth inference. The main reconstruction process stays in the GRAIL environment.

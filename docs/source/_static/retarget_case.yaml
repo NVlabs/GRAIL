@@ -1,0 +1,29 @@
+schema_version: 1
+source_model: soma03
+runtime:
+  python: /root/miniconda3/envs/sonic/bin/python
+source:
+  path: ../selected_fit.pkl
+  python: /root/miniconda3/envs/grail/bin/python
+  ground_initial_frame: false
+  model_config:
+    model_type: soma03
+    backend: native
+    soma_runtime: gem_x
+    gem_x_soma_assets: /workspace/grail/imports/GEM-X/assets/soma
+    soma_identity_params_path: /workspace/grail/data/body_profiles/unitree_g1/soma/soma03_custom_smplx_identity.npz
+    device: cuda:0
+backend:
+  soma_root: /workspace/grail/imports/soma-retargeter
+  python: /workspace/grail/imports/soma-retargeter/.venv/bin/python
+  robot: unitree_g1_dex3
+  extra_robot_paths:
+    - target_g1_dex3
+  human_scale_ratio: 1.0
+  device: cuda:0
+  bindings:
+    camera: source_camera.json
+native:
+  enabled: true
+  object_mesh: ../generation/mesh/Lab/weight/model.obj
+  scene_sidecar: original_floor.npz

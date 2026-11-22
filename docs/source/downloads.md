@@ -1,8 +1,10 @@
-# Checkpoints and example data
+# Checkpoints and Example Data
 
-Complete [Installation](installation.md) first. Keep the same checkout and cache for both examples. The two example videos and their scene inputs ship in Git LFS. The model weights are separate downloads. You can leave the full published motion dataset undownloaded.
+Complete [GRAIL Installation Guide](installation.md) first. Keep the same checkout and cache for both examples. The two example videos and their scene inputs ship in Git LFS. The model weights are separate downloads. You can leave the full published motion dataset undownloaded.
 
-## Verify the example inputs
+## Example input verification
+
+<span id="verify-the-example-inputs"></span>
 
 **GPU container, a few seconds.** Inspect both videos and count the G1 mesh files.
 
@@ -46,3 +48,30 @@ bash scripts/setup/download_checkpoints.sh --skip-gem-x --skip-mose3 --skip-foun
 Under `imports/SONIC/models/`, stairs uses `terrain_stairs/last.pt`. Kettlebell uses `manip_warmstart/last.pt` for the actor and `sonic_manipulation_base/` for its frozen decoder and config. The [published dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL) also provides released motion libraries for users who want to inspect existing results.
 
 Continue to the [Quick Start](quick_start.md) and choose a motion.
+
+## Reference policies and motion libraries
+
+The Quick Start fetches warm starts for adapting a policy. To evaluate a policy trained on released data, choose its **reference** bundle instead. Each contains `last.pt` and the matching `config.yaml`. Remote paths below are relative to the [GRAIL dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL/tree/main).
+
+| Task | Bundle under `checkpoint/SONIC/models/` | Matching library under `data/` |
+|---|---|---|
+| Table pick-up | `pnp_table_release/` | `pickup_table/` |
+| Ground pick-up | `pnp_ground_release/` | `pickup_ground/` |
+| Scene-aware tracking for terrain traversal and sitting | `terrain_release/` | `curb/`, `slope/`, `stair_p1/`–`stair_p4/`, `sitting/` |
+
+For the [released-policy evaluation](tracking.md#tracking-released-data), this optional container block downloads one table motion with its shape feature, texture and reference checkpoint into the existing results mount. The nine files total about 24.7 MB, including 17.1 MB for the checkpoint. The other examples use the two bundled inputs.
+
+```bash
+REF=/workspace/runs/reference
+BASE=https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL/resolve/main
+PICKUP_KEY=pickup_table__apple_0__000
+(
+for file in checkpoint/SONIC/models/pnp_table_release/{config.yaml,last.pt} \
+  data/pickup_table/{robot,objects,meta}/"$PICKUP_KEY.pkl" data/pickup_table/object_usd/"$PICKUP_KEY.usd" \
+  data/pickup_table/object_usd/textures/"$PICKUP_KEY"/image0.png data/pickup_table/bps/{"$PICKUP_KEY",_basis}.npy; do
+  curl --fail --location --silent --show-error --create-dirs "$BASE/$file" -o "$REF/$file" || exit 1
+done
+)
+```
+
+Expect the same filename stem under `robot/`, `objects/`, `object_usd/` and `bps/`. The source table motion has 250 frames. Check all files before starting the evaluator.

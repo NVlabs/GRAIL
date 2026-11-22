@@ -1,14 +1,20 @@
-# Prepare a new scene and video
+# New Scenes and Videos
+
+<span id="prepare-a-new-scene-and-video"></span>
 
 **Verification scope: this page was checked only with the released kettlebell inputs, including a copy repackaged under new names.** The two walkthroughs begin after video generation. For a new case, GRAIL’s documented route starts with an authored 3D scene and a generated video. See the [glossary](../configuration.md) for body, camera and contact terminology.
 
-## Start with a scene you control
+## Scene prerequisites
 
-1. Select or [create an object mesh](../gen_3d_assets.md). Establish its physical dimensions and export a **triangulated OBJ before recording contacts**. Keep those exact mesh bytes for reconstruction, retargeting and tracking; the handoff binds contacts to the original face and vertex order.
-2. Use [2D HOI generation](../gen_2dhoi.md) to place the character and object, settle the object, and render the scene in Blender. This yields the camera, object scale and initial pose, masks and metric depth in the same coordinate frame. An image-to-video model generates the RGB motion from the scene render. The released examples include these outputs.
+<span id="start-with-a-scene-you-control"></span>
+
+1. Select or [create an object mesh](../gen_3d_assets.md). Establish its physical dimensions. The static-terrain path accepts the generator's original polygon faces with `--static-terrain`. For manipulation, triangulate the OBJ **before** recording contacts and keep those exact bytes through tracking.
+2. Use [robot-centric human video generation](../gen_2dhoi.md) to place the character and object, settle the object, and render the scene in Blender. This yields the camera, object scale and initial pose, masks and metric depth in the same coordinate frame. An image-to-video model generates the RGB motion from the scene render. The released examples include these outputs.
 3. Inspect the generated video against frame zero. Reconstruction estimates the moving human and object poses, tracks masks and estimates later depth. Its contact and support review still uses the actual video. If the generator changed which way the handle faces, correct or replace the case before passing it to G1.
 
-## Inspect a fully named case
+## Example case layout
+
+<span id="inspect-a-fully-named-case"></span>
 
 The released input root is `examples/g1-2dhoi/kettlebell/generation/`. Its sequence is `ComAsset/kettle_bell/g1_kettlebell`. These paths are relative to that root.
 
@@ -31,7 +37,7 @@ depth_maps/ComAsset/kettle_bell/g1_kettlebell/000000.png
 ```bash
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate grail
-python docs/source/_static/check_capture.py examples/g1-2dhoi/kettlebell/generation \
+python scripts/standalone/check_capture.py examples/g1-2dhoi/kettlebell/generation \
   ComAsset/kettle_bell/g1_kettlebell /workspace/runs/frame-zero.jpg
 ```
 
@@ -39,23 +45,29 @@ python docs/source/_static/check_capture.py examples/g1-2dhoi/kettlebell/generat
 
 Expect 1,280 × 720, 7,084 triangles, a focal length of 1,468.60 pixels and 882,008 usable background pixels. The outlines should follow the outside of the bell **and** the handle opening. A good outline checks this projection only. During fitting, read the depth cache’s `gt_calibration.frames` entries. A frame marked `insufficient_valid_background` had fewer than 100 valid background samples after also applying the predictions’ validity mask. Inspect depth registration and masks before relying on metric scale.
 
+For start/end pickup outputs, select the full video stem and the shorter conditioning stem separately. For example, a repackaged lift with video `Lab/weight/lift01-start-end` used `--scene-id lift01`. The checker printed both resolved paths and 7,084 triangles. A same-name clip needs no override. For a fresh render, first use the [pre-provider check](../gen_2dhoi.md#conditioning-frame-checks).
+
 ## Frame-zero camera and depth
 
 In the generation camera pickle, `R` rotates from Blender camera coordinates to the world and `t` is the camera position in world metres. The pose pickle stores those as `cam_R` and `cam_t`. It supplies `frame_width`, `frame_height` and one `focal_length` in pixels. The fitter centres the principal point at (width/2, height/2) and uses the same focal length for both axes. Compare both focal entries in `cam_K.txt` and both pickles before using an overlay. The original OBJ is scaled by `obj_scale`, rotated by `obj_R` and translated by `obj_t` into world coordinates.
 
 The frame-zero PNG stores depth in millimetres. Human and object foreground do not supply static background scale. At least 100 registered background samples between 0.1 and 65 metres are necessary; per-frame prediction validity can reduce that count during fitting.
 
-## Carry the same scene through the stages
+## Scene inputs by stage
 
-Follow the [kettlebell walkthrough](kettlebell.md) for the released lift. For a new generated case, bind the two prompts and tracking handoff to one sequence:
+<span id="carry-the-same-scene-through-the-stages"></span>
+
+The [released kettlebell tutorial](kettlebell.md) uses fixed example paths. For your own input, follow the [case-specific reconstruction request](../recon_4dhoi.md#configs), [G1 conversion request](../retargeting.md#native-retargeting) and [case-specific handoff](../retargeting.md#tracking-handoff). Carry the same case root, input sequence and robot output through them.
 
 | Stage | What should identify your case |
 |---|---|
 | Reconstruction | For a manipulation case, copy `configs/recon_4dhoi/manip_soma.yaml`. Give the reconstruction prompt the path to your edited copy, the generation root, dataset/category/clip and a fresh fit directory. Check the source video and OBJ hashes in the resulting inventory. Set the same measured plane with provenance in `optimization.opt_stage_specs.init_opt.loss_cfg.human_foot_ground.plane` and the corresponding `contact_opt` field. |
-| G1 retargeting | Name that selected fit and its source-specific `contact_map.json` as inputs. Deliver `robot.npz` and `retargeting.mp4` into the case directory. Check the source and original CAD bindings against the reconstruction. See {blob}`the contact-map format <docs/fixed_contact_points.md>`. |
-| Optional tracking | Set `CASE` to that same directory and choose the case’s own motion key. Pass its reviewed robot and contact map to handoff. Use the original finite support for a floor case; use the table support appropriate to a tabletop pickup. The final evaluation directory uses the chosen motion key. See the [handoff guide](../retargeting.md#hand-off-a-retargeted-motion). |
+| G1 retargeting | Name that selected fit and its source-specific `contact_map.json` as inputs. Deliver `robot.npz` and `retargeting.mp4` into the case directory. Check the source and original CAD bindings against the reconstruction. See [contact-map inputs](../recon_4dhoi.md#case-inputs-and-contact-maps). |
+| Optional tracking | Set `CASE` to that same directory and choose the case’s own motion key. Pass its reviewed robot and contact map to handoff. Use the original finite support for a floor case; use the table support appropriate to a tabletop pickup. The final evaluation directory uses the chosen motion key. See the [handoff guide](../retargeting.md#tracking-handoff). |
 
-## Can I use phone footage?
+## Real footage
+
+<span id="can-i-use-phone-footage"></span>
 
 There is no verified raw-phone-video-to-G1 walkthrough. For a fixed-camera recording you would have to supply intrinsics consistent with the fitter, a camera pose relative to the measured floor, a metric triangulated mesh and starting pose, registered frame-zero background depth, and human and object masks on the original video clock. A moving or digitally stabilized camera also needs a consistent camera model over time. The example tools do not recover that complete scene from arbitrary RGB footage.
 

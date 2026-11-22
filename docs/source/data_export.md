@@ -1,21 +1,19 @@
-# Motion data export
+# Data Export
 
-For an existing rollout, `grail.data_export.export_successful_rollouts` extracts robot and object motion. To merge locally exported shards, run `python -m grail.data_export.merge_exports --help` for the required experiment and source directories. Inspect the merged manifest and overlap counts before using a library.
+<span id="export-recorded-policy-motion"></span>
 
-For native retargeting output, use the [manipulation handoff](retargeting.md#hand-off-a-retargeted-motion). It preserves the source clock and object geometry needed by a downstream tracker.
+<span id="motion-data-export"></span>
+
+<span id="which-input-do-i-have"></span>
+
+Export produces a motion library from what the simulated robot actually did. You need the **recorded trajectory**, its evaluation metrics and the matching source library for the scene geometry. A native robot NPZ is ready for [tracking](tracking.md); a checkpoint still needs an evaluation with recording.
 
 
-## Which input do I have?
+<span id="can-i-export-the-short-stairs-evaluation"></span>
 
-| Input in hand | Next step |
-|---|---|
-| A reviewed native `robot.npz` | Use the [terrain or manipulation tutorial](quick_start.md) to pack it for training. |
-| A trained policy checkpoint | Evaluate it on its matching motion and scene. Inspect progress, termination and object metrics before export. |
-| A rollout evaluation with `metrics_eval.json` and recorded `.trajectory.pkl` files | Supply the evaluation directory, matching source motion library and a fresh output directory to the exporter. A checkpoint or metrics file alone contains no replay trajectory. |
+## Single-motion export
 
-By default a motion must finish without early termination and reach full reference progress to be selected. When trajectories are available, the exporter writes the robot and object motions, object USD, metadata and an `export_manifest.json`. Inspect its exported count and skipped trajectories before opening the [visualizer](visualization.md). A short tracking smoke run may yield no exportable motion.
-
-## Can I export the short stairs evaluation?
+<span id="record-and-export-one-stairs-evaluation"></span>
 
 The tutorial’s default terrain evaluator writes a metrics JSON. Its four-update run ended early and produced no recorded trajectory. A policy checkpoint alone cannot be opened as a rollout in the motion visualizer. You can watch the kinematic reference in `retargeting.mp4` immediately, or use the [published motion library](https://huggingface.co/datasets/nvidia/PhysicalAI-Robotics-Locomanipulation-GRAIL) for an existing trajectory.
 
@@ -50,4 +48,61 @@ python -m grail.data_export.export_successful_rollouts \
 
 The recorded four-update policy reached 11.8% of the reference and terminated early. The exporter printed `SKIP: stairs (terminated)` and `No successful motions found. Nothing to export.` It returned without creating a motion library. A completed reference can be selected by the same command with its matching recorded evaluation. Recording the trajectory does not change the policy’s performance.
 
-For a completed full-schedule stairs policy, select `tracking-full/train/model_step_005000.pt` in the recording block and choose fresh recording and export directories in both blocks. For a successful export, check that the library contains `robot/`, `objects/` and `object_usd/`. The [visualizer](visualization.md) reads those files and writes a kinematic replay under `vis/` on a host with working Isaac Sim rendering. The short run above yields no watchable stair rollout; the [production stair image](results.md#stair-climb) comes from a separate rendered evaluation on an L40S.
+## Output layout
+
+<span id="read-the-export-result"></span>
+
+This guide ran the early-termination case only. No successful library was exported in this verification. By default the exporter requires a non-terminated motion with `--min_progress 1.0`. Set `--obj_pos_threshold` to apply an additional object-position error limit.
+
+For an eligible recorded rollout, inspect `export_manifest.json`. Its `exported_count` should be positive and each entry should have its matching robot PKL, object PKL and USD. `skipped_no_trajectory` counts eligible motions without recordings. The exporter's `--verify <library-directory>` checks an existing library and does not create one. The short run returned zero eligible motions in under a second on the i9-14900K.
+
+If the rollout terminated, inspect the tracking result. If a completed motion lacks a trajectory, enable recording when evaluating it. Use [Visualization](visualization.md) for an existing library.
+
+<span id="running"></span><span id="prerequisites"></span><span id="step-0-pick-the-best-checkpoints"></span>
+
+## Pipeline
+
+<span id="export-a-collection-of-tracking-rollouts"></span>
+
+For a collection, the steps are **select checkpoints → evaluate with trajectory recording → replay if needed → export completed motions → merge shards**.
+
+| Operation | Public entry point |
+|---|---|
+| Rank checkpoints | `grail.data_export.select_top_checkpoints` |
+| Record and summarize evaluations | `gear_sonic/eval_agent_trl.py` and `grail.data_export.summarize_phase1_sr` |
+| Render a kinematic replay | `grail.visualization.batch_render_replay` |
+| Export eligible trajectories | `grail.data_export.export_successful_rollouts` |
+| Merge the exported shards | `grail.data_export.merge_exports` |
+
+Use the merged `robot/`, `objects/` and `object_usd/` as the training configuration’s `motion_file`, `object_motion_file` and `object_usd_path`. When the task uses shape features or hand-contact labels, check those inputs against the original library as described in [tracking](tracking.md#preparing-retargeted-data-for-training).
+
+Use this path for several checkpoints or motion shards. Start with the training run, its matching motion library and object USDs. A policy checkpoint alone supplies neither the evaluation trajectories nor the scene assets. In the configured environment, set `WB_RUN` to your own W&B run path if you used W&B. Select the top five checkpoints:
+
+```bash
+python -m grail.data_export.select_top_checkpoints --run "$WB_RUN" --k 5
+```
+
+<span id="step-1-shard-eval-write-phase-1-trajectories"></span><span id="step-2-render-export-per-shard"></span>
+
+For a group, supply `--group`, `--entity` and `--project`. For each selected step, evaluate the assigned motion subset using the trajectory-saving options above. Each worker must write its own `eval/step_<step>/phase1_shard_<rank>/` containing `metrics_eval.json` and the trajectory pickles. Ensure shards have disjoint motion keys. For one shard, set `EXP_DIR` to your experiment, `SOURCE` to the original library, `STEP` to the exact directory suffix and `RANK` to its index:
+
+```bash
+SHARD="$EXP_DIR/eval/step_${STEP}/phase1_shard_${RANK}"
+OUT="$EXP_DIR/exported/step_${STEP}/shard_${RANK}"
+python -m grail.visualization.batch_render_replay --shard_dir "$SHARD" --traj_dir "$SHARD" \
+  --object_usd_dir "$SOURCE/object_usd" --output_dir "$OUT/vis" --skip_existing --headless
+python -m grail.data_export.export_successful_rollouts --eval_dir "$SHARD" \
+  --source_data "$SOURCE" --output_dir "$OUT" --min_progress 1.0
+```
+
+<span id="step-3-merge-shards"></span>
+
+The renderer uses the SONIC environment and an RTX-capable simulator. Repeat per shard. Then aggregate the metrics and merge completed shards (set `N` to the actual shard count):
+
+```bash
+python -m grail.data_export.summarize_phase1_sr --exp_dir "$EXP_DIR" --steps "$STEP"
+python -m grail.data_export.merge_exports --exp_dir "$EXP_DIR" --source_data "$SOURCE" \
+  --step "$STEP" --num_shards "$N"
+```
+
+Inspect `exported/step_<step>/merged/` for robot and object PKLs, USDs with textures, and replay MP4s under `vis/`. Include metadata when available. The merger checks counts, duplicate motion keys and shard overlap. Use the [web viewer](web_visualizer.md) to inspect a library. These batch interfaces were checked against the release tools; the short stairs example above ran the early-termination export path.

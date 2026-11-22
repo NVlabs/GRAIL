@@ -1,14 +1,18 @@
-# Getting started
+# System Requirements
 
-You can run GRAIL without generating a video or owning a robot. The two bundled recordings come with their camera, object mesh and initial scene geometry. Pick **stairs** for body-only locomotion or **kettlebell** for hand–object contact. Both finish by training and evaluating a policy in simulation.
+<span id="getting-started"></span>
 
-## Before you download
+You can run GRAIL without generating a video or owning a robot. The two bundled recordings come with their camera, object mesh and initial scene geometry. Pick **stairs** for terrain traversal or **kettlebell** for hand–object contact. Both finish by training and evaluating a policy in simulation.
+
+## Prerequisites
+
+<span id="before-you-download"></span>
 
 | Requirement | Plan for |
 |---|---|
 | GPU host | Tested on Ubuntu 24.04 LTS with an RTX 6000 Ada (48 GB), driver 595.99.02, one video at a time. The L40S production rollout rendered on driver 580.95.05. See [GPU and renderer troubleshooting](troubleshooting.md). |
 | Storage | The standard image is about 89 GB unpacked. The published input weights total about 20 GB before additional first-use inference downloads. In addition to the image, allow roughly 100 GB on a fast writable disk for the checkout, [isolated workers](configuration.md), weights, package caches and short-run outputs. Leave extra room for downloads and full training checkpoints. These are planning figures, not installation minima. |
-| Tools and accounts | Install [Git LFS](https://git-lfs.com/), [Docker Engine](https://docs.docker.com/engine/install/) and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host. Reconstruction and retargeting use [OpenAI Codex CLI](installation.md#check-codex-on-the-host). The supplied clips and released weights can be downloaded anonymously. |
+| Tools and accounts | Install [Git LFS](https://git-lfs.com/), [Docker Engine](https://docs.docker.com/engine/install/) and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host. Reconstruction and retargeting use [OpenAI Codex CLI](installation.md#host-prerequisites). The supplied clips and released weights can be downloaded anonymously. |
 | Simulation | The tracking examples use Isaac Sim inside the `sonic` environment. Review the [Isaac Sim terms](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/common/legal.html) before the tracking **installation**, which records acceptance. For the code and assets, see [GRAIL licensing](resources.md). |
 
 **Host, a few seconds.** From the directory where you will keep the checkout, check the GPU, Docker, Git LFS and available space. Look for your GPU name and memory, two tool versions and room on the disk you plan to use. Docker's image store may be on a separate disk.
@@ -20,7 +24,9 @@ git lfs version
 df -h .
 ```
 
-## Budget your first run
+## First-run time and storage
+
+<span id="budget-your-first-run"></span>
 
 Approximate timings below are from a single RTX 6000 Ada. Reconstruction and retargeting include source review and preview generation; agent decisions and scene complexity affect wall time.
 
@@ -34,9 +40,11 @@ Approximate timings below are from a single RTX 6000 Ada. Reconstruction and ret
 | First case, including shared setup and the short tracking run | About 1½–2¼ hours | About 1¼–2 hours plus first-use depth transfer |
 | Full tracking on a single L40S, 2,048 environments × 5,000 updates | About 4 h 13 min | About 8 h 45 min |
 
-The full-schedule timings are from separate single-L40S production runs. The local examples below exercise a shorter schedule in the standard release image.
+The full-schedule timings in the table are from separate single-L40S production runs. An earlier per-object manipulation benchmark on a 48 GB RTX 6000 Ada observed about 29 GB in use and about 5 s per update at 2,048 environments, implying roughly 7 hours of training for 5,000 updates. Workstation timing for full stairs training is still unknown. The local examples below exercise a shorter schedule in the standard release image.
 
-### Will it fit on my GPU?
+### GPU memory
+
+<span id="will-it-fit-on-my-gpu"></span>
 
 These are sampled **application** peaks from a separate run in the standard release image on a 48 GB RTX 6000 Ada. Tracking used 64 environments, 20 updates and metrics-only evaluation. Other workloads and driver allocations need additional memory.
 
@@ -48,4 +56,4 @@ These are sampled **application** peaks from a separate run in the standard rele
 
 Stairs retargeting had a gap in sampling. Its observed value is a lower bound. **Inference for smaller cards:** the sampled stairs stages fit inside 24 GiB on paper. Kettlebell reconstruction exceeded 24 GiB, and tracking leaves little room on a 24 GiB card. On 32 GiB, kettlebell reconstruction leaves about 3 GiB before other allocations. Free the GPU for the run; reducing the tracking environment count cannot reduce reconstruction memory. Neither card nor full-schedule memory use was tested in this comparison.
 
-Continue with [Installation](installation.md), then [Checkpoints and example data](downloads.md).
+Continue with [GRAIL Installation Guide](installation.md), then [Checkpoints and Example Data](downloads.md).

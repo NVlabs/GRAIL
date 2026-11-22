@@ -1,6 +1,6 @@
 # Troubleshooting
 
-1. **The model installer reports “Invalid binary mesh” or a video will not open.** A small text file beginning with `version https://git-lfs.github.com/spec/v1` is an LFS pointer. Install Git LFS on the host, hydrate the checkout with the [installation commands](installation.md#get-the-code-and-the-image), then [verify the input files](downloads.md#verify-the-example-inputs). Initializing submodules alone does not hydrate the parent repository.
+1. **The model installer reports “Invalid binary mesh” or a video will not open.** A small text file beginning with `version https://git-lfs.github.com/spec/v1` is an LFS pointer. Install Git LFS on the host, hydrate the checkout with the [installation commands](installation.md#docker-recommended), then [verify the input files](downloads.md#example-input-verification). Initializing submodules alone does not hydrate the parent repository.
 2. **Setup fails while creating the CUDA rasterizer.** Use `nvgrail/grail:1.2.0` for the bundled videos. The `1.2.0-minimax-h3` variant is for local MiniMax-H3 video generation. Its setup rasterizer failed on an RTX 6000 Ada in testing. The bundled videos need neither a video-generation service nor that image.
 3. **Training works but kettlebell video evaluation exits during RTX startup.** On an RTX 6000 Ada with driver 595.99.02, Isaac Sim also crashed creating an empty rendering stage outside Docker. Video evaluation worked on an L40S with driver 580.95.05. Use the metrics-only setting in the [kettlebell tutorial](tutorials/kettlebell.md) to evaluate without rendering. These observations do not establish a compatible driver range.
 4. **The worker reports a missing package while opening the SOMA fit.** Use the Python interpreter from the `grail` environment for source export and the pinned SOMA retargeter's own virtual environment for robot conversion. The [Docker installer](installation.md) configures both. GRAIL's released examples use SOMA03. Running the standalone legacy SMPL-X route requires your own compatible legacy GMR installation.
@@ -12,7 +12,9 @@
 8. **MoSE3 reports `torch.OutOfMemoryError` during kettlebell object tracking.** Check free GPU memory while tracking is running. On the shared 48 GB card one allocation requested 770 MiB when only 441 MiB was free. The agent reduced the MoSE3 window from 120 to 40 target frames and reran that worker on the same case. It recovered a pose for every frame. Retain the case directory so that the completed source masks, human pose and depth can be reused. Verify the object trajectory covers every source frame before fitting.
 
 (retry-manipulation)=
-## Retry tracking after a simulator memory error
+## Simulator memory errors
+
+<span id="retry-tracking-after-a-simulator-memory-error"></span>
 
 If PhysX ran out of GPU memory before creating the first checkpoint, a later missing-`last.pt` error is a consequence. Once GPU memory is available, reuse the terrain library or manipulation handoff from the previous attempt.
 

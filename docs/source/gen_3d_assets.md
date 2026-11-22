@@ -1,112 +1,66 @@
 # 3D Asset Generation
 
-GRAIL has two complementary 3D-asset pipelines: a **procedural** generator
-for terrain primitives (curbs, slopes, stairs) and an **AI-generated**
-pipeline using Tencent's [Hunyuan3D-2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1)
-for textured object meshes from text.
+<span id="generate-a-3d-asset"></span>
+
+The released stairs and kettlebell tutorials start with a generated video and its scene files. This guide builds a stair mesh on the CPU. The release includes no complete worked example that follows a third object from its mesh through video generation to a reviewed robot motion.
 
 ## Procedural terrain
 
-No GPU, no external services — direct OBJ generation.
+<span id="make-one-staircase"></span>
+
+In the `grail` environment, from the checkout root, generate a uniform four-step staircase. The count options select four steps in this **one** asset. The seed fixes the random draws.
 
 ```bash
-# All terrain types (300 of each by default)
-python -m grail.pipelines.gen_terrain --type all --num 300 --output_dir data/Terrain
-
-# A specific type
-python -m grail.pipelines.gen_terrain --type curb --num 40
-python -m grail.pipelines.gen_terrain --type slope --num 100 --seed 1234
-python -m grail.pipelines.gen_terrain --type stairs --num 50 --output_dir data/syn_stairs
+python -m grail.pipelines.gen_terrain --type stairs --num 1 --seed 42 --uniform \
+  --stair-min-steps 4 --stair-max-steps 4 --output_dir data/guide_terrain
 ```
 
-Each asset lands in `data/<output>/<type>_<NNN>/` as `model.obj`,
-`model.mtl`, and `texture.jpg`.
+Open `data/guide_terrain/stairs_000/model.obj`. Keep `model.mtl` and `texture.jpg` beside it. The verified output was 6.6 KiB of OBJ geometry, a 129-byte material and a 1.8 KiB texture. Generation took less than a second on an Intel Core i9-14900K in `nvgrail/grail:1.2.0`, without a GPU. The [video generation guide](gen_2dhoi.md) uses this exact directory.
 
-## Hunyuan3D (text → textured mesh)
+If the renderer reports a missing mesh, check the dataset directory and category separately. Here the dataset is `guide_terrain` and the category is `stairs_000`. If the shape opens without its texture, check the two relative material references before moving the asset.
 
-Run the Hunyuan3D asset pipeline through its package module from the repo
-root. This stage does not have a project-root wrapper script.
+## Manipulation objects
 
-The Hunyuan3D pipeline uses the `hunyuan` conda env (separate from `grail`)
-and calls the OpenAI API for prompt enhancement, height estimation,
-image-prompt verification, and reference-image generation. Chat and vision
-helpers default to `gpt-4o`; reference images use `gpt-image-1.5`.
+<span id="choose-a-manipulation-object"></span>
+
+For pickup, put your metric, triangulated rigid mesh at `data/<dataset>/<category>/model.obj` with the referenced MTL and textures. Keep its scale and vertex order after binding contacts. Give your dataset and category their own entry in a copy of the {blob}`object list <configs/objects/robocasa.yaml>`, then select that list from your [pickup preset](configuration.md#configuration-by-motion-type). Choose a camera that shows the handle opening and lift direction.
+
+<span id="hunyuan3d-text-textured-mesh"></span>
+<span id="bundled-object-lists"></span>
+
+For text-to-mesh, the {blob}`Hunyuan3D pipeline <grail/pipelines/gen_3d_assets.py>` takes a list of objects such as {blob}`configs/gen_3d/example_objects.yaml`. Select the list with `--input` and a new asset directory with `--output`. It generates a reference image, reconstructs and textures the mesh, and estimates scale. Use the `hunyuan` environment, a GPU and `OPENAI_API_KEY` for the image service. The tutorial download uses `--skip-hunyuan3d`. For this route, omit that flag when downloading checkpoints to fetch `RealESRGAN_x4plus.pth`. The Hunyuan3D-2.1 shape and paint weights download on first use. Inspect the available inputs in the release image:
+
+```bash
+conda run -n hunyuan python -m grail.pipelines.gen_3d_assets --help
+```
+
+The CLI loaded in about half a minute on the reference workstation. This check exercised argument discovery only. Text-to-mesh generation time and peak GPU memory were not measured for this guide. Inspect any generated mesh and verify its scale before fitting a human to it.
+
+<span id="sharded-fan-out"></span>
+
+For a larger batch of independent assets, the Hunyuan entry point accepts a chunk count and index. Use the same object list on each worker and assign disjoint indices. The timed example above covers CLI setup only.
+
+## Asset collections
+
+<span id="generate-a-collection"></span>
+
+From the checkout root, pick a procedural type (`curb`, `slope`, `stairs` or `all`) and keep the seed to reproduce its geometry. For example:
+
+```bash
+python -m grail.pipelines.gen_terrain --type slope --num 3 --seed 1234 --output_dir /workspace/runs/slopes
+```
+
+For text-conditioned generation, use the separate Hunyuan environment and [generation prerequisites](manual_installation.md). The pipeline enhances the object description, generates a reference image, checks image–prompt agreement, removes the background, generates shape and texture, and estimates metric height. Adjust `--max-image-retries` to bound reference-image verification. Inspect the resulting OBJ, material and texture before preparing an interaction. Supply an object list and a fresh output location:
 
 ```bash
 conda run -n hunyuan python -m grail.pipelines.gen_3d_assets \
-    -i configs/gen_3d/example_objects.yaml \
-    -o data/gen_example
+  -i configs/gen_3d/example_objects.yaml -o /workspace/runs/generated-objects
 ```
 
-Pipeline per object:
+Use `configs/gen_3d/chairs.yaml` for a larger chair collection. On each of N workers pass the same input and `--num_job_chunks N --job_chunk_idx I`, with a distinct zero-based I. These options were checked in the image. Generating a new textured collection requires model downloads, API access and GPU time.
 
-1. Enhance the user prompt for 3D-friendly framing.
-2. Generate a 1024×1024 reference image.
-3. Verify image-prompt match; retry up to `--max-image-retries`.
-4. Background remove and resize to 512×512.
-5. Hunyuan3D shape generation → `mesh.glb`.
-6. Hunyuan3D texture paint → textured `model.obj` + materials.
-7. Estimate real-world height (vision chat) and rescale.
+### Object selection guidelines
 
-Each object takes ~2 minutes on an L40S.
+<span id="select-objects-that-can-be-tracked"></span>
 
-### Sharded fan-out
-
-`grail.pipelines.gen_3d_assets` accepts `--num_job_chunks N` and `--job_chunk_idx i` so the
-work can fan out across N workers:
-
-```bash
-python -m grail.pipelines.gen_3d_assets \
-    -i configs/gen_3d/chairs.yaml \
-    -o data/gen_chairs \
-    --job_chunk_idx <i> \
-    --num_job_chunks <N>
-```
-
-## Bundled object lists
-
-| Config | Count | Use |
-|---|---|---|
-| `configs/gen_3d/example_objects.yaml` | 6 | Smoke test |
-| `configs/gen_3d/chairs.yaml` | 70 | Diverse rigid chairs (sitting demos) |
-
-Each YAML is a plain list of object descriptions, one per line. Larger
-object batches are not shipped in the repo; generate your own lists using
-the guidelines below.
-
-## Object selection guidelines
-
-The downstream HOI pipeline (Hunyuan3D shape gen → Blender render → physics
-sim → 4D reconstruction) is sensitive to the kind of object you generate.
-When curating a list, follow these rules:
-
-**Prefer:**
-
-- Mid-sized objects suitable for human/robot manipulation. Typical largest
-  dimension **5–60 cm** for table-top, **50–150 cm** for floor placement.
-- Single rigid bodies — no cloth, fabric, hair, or flexible/deformable items.
-- Visually asymmetric or feature-rich enough that orientation is well-defined
-  (so FoundationPose can lock onto a canonical pose).
-
-**Avoid:**
-
-- **Too small** (< ~5 cm: spoons, paperclips, screws, single coins, dice) —
-  get lost in 1280×720 renders, contact reasoning becomes ambiguous.
-- **Too large** (> ~150 cm: fridges, sofas, full-size treadmills, vehicles) —
-  won't fit in indoor scenes; exceed the character's reachable workspace.
-- **Articulated** objects (fridges with doors, scissors, foldable chairs,
-  drawers, robot arms with joints) — Hunyuan3D produces a single rigid mesh
-  and articulation is lost.
-- **Fully rotationally symmetric** objects (plain spheres, plain balls,
-  generic orbs) — orientation is undefined, FoundationPose tracking is
-  degenerate. *Asymmetric variants — soccer balls with panels, basketballs
-  with seams — are fine.*
-- **Phantom flat-base risk** — bare "cube", "pedestal", "sculpture display",
-  or "modern minimalist block" descriptions tend to come out of Hunyuan3D
-  with an extra flat slab/plinth baked under them. Specify natural feet or
-  contact surface explicitly: e.g. *"concrete cube side table on four small
-  recessed feet"*, *"sculpture with a rounded organic base"*, *"ottoman with
-  hairpin legs"*.
-
-`configs/gen_3d/chairs.yaml` is the in-repo example list that follows these
-rules — mirror its style and granularity when authoring new lists.
+Choose a rigid object with a visible handle, texture or distinct faces. A smooth sphere has no observable orientation. Very small objects can disappear in a 720p frame, and a large tabletop object can exceed the character's reach. As starting ranges, the earlier asset guide used a largest dimension of 5–60 cm on a table and 50–150 cm on the floor. Check the actual scene. Avoid hinged or flexible items for a single-rigid-mesh pipeline. Describe the real contact surface, such as four recessed feet, to reduce spurious plinths in generated geometry.

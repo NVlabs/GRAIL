@@ -1,5 +1,9 @@
-GRAIL documentation
-===================
+GRAIL: Generating Humanoid Loco-Manipulation from World Models
+==============================================================
+
+.. raw:: html
+
+   <span id="grail-documentation"></span>
 
 Start with a video. Recover the human and object motion, transfer it to a Unitree G1, and train a policy to follow it in simulation. The two examples include the video, camera and metric object mesh.
 
@@ -7,20 +11,24 @@ Start with a video. Recover the human and object motion, transfer it to a Unitre
 
    **First time here?** Check :doc:`GPU, disk and time requirements <requirements>`, then :doc:`start the GPU container <installation>` and :doc:`download the weights <downloads>`.
 
-Choose a tutorial
------------------
+Tutorials
+---------
+
+.. raw:: html
+
+   <span id="choose-a-tutorial"></span>
 
 .. grid:: 1 1 2 2
    :gutter: 3
 
-   .. grid-item-card:: Climb stairs
+   .. grid-item-card:: Stair Climbing
       :link: tutorials/stairs
       :link-type: doc
       :img-top: _static/examples/stairs.jpg
 
       Watch the fitted feet land on each tread, then train a simulated G1 to climb the same stairs.
 
-   .. grid-item-card:: Lift a kettlebell
+   .. grid-item-card:: Kettlebell Lifting
       :link: tutorials/kettlebell
       :link-type: doc
       :img-top: _static/examples/kettlebell.jpg
@@ -51,7 +59,7 @@ Pipeline at a glance
    :width: 100%
 
 .. image:: ../../assets/images/motion_tracking.jpeg
-   :alt: Motion tracking pipeline
+   :alt: Task-general loco-manipulation tracking pipeline
    :align: center
    :width: 100%
 
@@ -59,8 +67,14 @@ The bundled examples start at the video and scene. If you are generating a new
 scene, first :doc:`create the mesh <gen_3d_assets>` and :doc:`generate the video <gen_2dhoi>`.
 
 1. :doc:`Reconstruct <recon_4dhoi>` the human and object, then inspect the fit against the source video.
-2. :doc:`Retarget <retargeting>` the reviewed motion to the body-only G1 for stairs or the G1 with DEx3 hands for the kettlebell.
+2. :doc:`Retarget <retargeting>` the reviewed motion to the Unitree G1, preserving the finger joints for the kettlebell grasp.
 3. :doc:`Train and evaluate <tracking>` a terrain or manipulation policy with the matching scene and motion. Inspect its rollout metrics before exporting a trajectory.
+
+.. raw:: html
+
+   <span id="bundled-dependencies"></span><span id="id1"></span>
+
+See :doc:`the component guide <resources>` for bundled dependencies and :doc:`installation` for submodules and downloads.
 
 Sim-to-Real Deployment
 ----------------------
@@ -77,8 +91,12 @@ Rendered Egocentric Views
    :align: center
    :width: 100%
 
-Real-robot clips
-~~~~~~~~~~~~~~~~
+Real-Robot Deployment
+~~~~~~~~~~~~~~~~~~~~~
+
+.. raw:: html
+
+   <span id="real-robot-clips"></span>
 
 .. list-table::
    :widths: 50 50
@@ -113,7 +131,7 @@ Real-robot clips
 
 .. toctree::
    :maxdepth: 2
-   :caption: Pipeline Guides
+   :caption: Pipelines
 
    gen_3d_assets
    gen_2dhoi
