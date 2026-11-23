@@ -6,7 +6,10 @@
 
 Reconstruct a person lifting the supplied kettlebell, transfer the grasp to a robot with articulated fingers, then evaluate whether an object-aware manipulation policy keeps the object on its reference trajectory.
 
-![Frame from the supplied kettlebell manipulation video](../_static/examples/kettlebell.jpg)
+<figure>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/kettlebell.jpg" aria-label="Bundled source video of the kettlebell lift"><source src="../_static/examples/kettlebell-input.mp4" type="video/mp4"><img src="../_static/examples/kettlebell.jpg" alt="Bundled source video of the kettlebell lift"></video>
+<figcaption>Bundled input · 121 frames at 24 fps.</figcaption>
+</figure>
 
 ## Prerequisites
 
@@ -41,8 +44,8 @@ unresolved fit or contact."
 ### Expected result
 
 <figure>
-<img class="grail-stage-player" src="../_static/examples/kettlebell-recon.jpg" alt="Full original video frame and calibrated SOMA overlay of the lifted kettlebell during the first swing.">
-<figcaption>Frame 60, during the first swing. The source and calibrated overlay show the full body and the lifted bell from the same camera. The still documents the lift; the precise finger contacts remain unresolved. Standard release image 1.2.0, RTX 6000 Ada.</figcaption>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/kettlebell-recon.jpg" aria-label="Full source and calibrated fitted-body overlay through both kettlebell swings"><source src="../_static/examples/kettlebell-recon.mp4" type="video/mp4"><img src="../_static/examples/kettlebell-recon.jpg" alt="Full source and calibrated fitted-body overlay through both kettlebell swings"></video>
+<figcaption>Full <code>reconstruction.mp4</code> from the reconstruction step, 121 frames at 24 fps. Watch the lift in the calibrated overlay at frame 60 and the handle during the second swing. Precise finger contacts remain unresolved. Release image 1.2.0, RTX 6000 Ada.</figcaption>
 </figure>
 
 Open `reconstruction.mp4` and `contact_map.json`. Watch the hands close before the bell lifts at frame 42, then compare the handle angle in the second swing at frames 94–96.
@@ -75,8 +78,8 @@ case. Report any unresolved contact."
 ### Expected result
 
 <figure>
-<img class="grail-stage-player" src="../_static/examples/kettlebell-robot.jpg" alt="The source, calibrated robot overlay and oblique G1 view show the lifted kettlebell at frame 60.">
-<figcaption>Frame 60, first swing. The calibrated view preserves the original framing; the oblique view shows both hands and the floor. The lowest point of the bell is 0.57 m above the registered floor. Standard release image 1.2.0, RTX 6000 Ada.</figcaption>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/kettlebell-robot.jpg" aria-label="Full source, calibrated G1 overlay and fixed oblique view through both kettlebell swings"><source src="../_static/examples/kettlebell-robot.mp4" type="video/mp4"><img src="../_static/examples/kettlebell-robot.jpg" alt="Full source, calibrated G1 overlay and fixed oblique view through both kettlebell swings"></video>
+<figcaption>Full <code>retargeting.mp4</code> from the G1 step, 121 frames at 24 fps. The oblique view shows both hands and the floor. At frame 60 the lowest point of the bell is 0.57 m above the registered floor. Release image 1.2.0, RTX 6000 Ada.</figcaption>
 </figure>
 
 Open `robot.npz` and `retargeting.mp4`. Compare the two wrists, opposing fingers and moving handle in the source and oblique views.
@@ -114,6 +117,11 @@ EVAL_NO_VIDEO=1 NUM_ENVS=64 ITERATIONS=4 EVAL_EVERY=4 bash scripts/tracking/mani
 ### Expected result
 
 **Local short run:** the four-update policy reached 44.4% of the reference and ended with `failure:object_pos_deviation`. Mean object-position error was 3.1 cm over that partial lift; maximum error was 26.4 cm. The metrics-only command writes a checkpoint and JSON.
+
+<figure>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/kettlebell-tracking.jpg" aria-label="Fixed-camera recording of the final kettlebell policy lifting the object"><source src="../_static/examples/kettlebell-tracking.mp4" type="video/mp4"><img src="../_static/examples/kettlebell-tracking.jpg" alt="Fixed-camera recording of the final kettlebell policy lifting the object"></video>
+<figcaption>Full <code>output/eval.mp4</code> from the final evaluation of the 5,000-update policy, 251 recorded frames at 50 fps. The fixed camera shows the bell rising 0.74 m. Production image 1.1.0, one L40S. The launcher writes this video when rendering is enabled.</figcaption>
+</figure>
 
 Open `tracking/eval_final/kettlebell/summary.json` under the case directory. On the host this is `../grail-demo/runs/kettlebell/`; in the container it is `/workspace/runs/kettlebell/`. Look for `tracking_success=false`, `reference_coverage=0.444` and `end_reason`. Within `object_metrics`, `object_position_error_mean_m` and `object_position_error_max_m` are in metres. The checkpoint is `tracking/finetune/train/model_step_000004.pt`.
 

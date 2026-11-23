@@ -43,6 +43,8 @@ python scripts/standalone/check_capture.py examples/g1-2dhoi/kettlebell/generati
 
 ![Projected kettlebell outline and source mask at frame zero](../_static/examples/kettlebell-frame-zero.jpg)
 
+Frame 0 only. The magenta CAD outline and green mask show the single-frame calibration check.
+
 Expect 1,280 × 720, 7,084 triangles, a focal length of 1,468.60 pixels and 882,008 usable background pixels. The outlines should follow the outside of the bell **and** the handle opening. A good outline checks this projection only. During fitting, read the depth cache’s `gt_calibration.frames` entries. A frame marked `insufficient_valid_background` had fewer than 100 valid background samples after also applying the predictions’ validity mask. Inspect depth registration and masks before relying on metric scale.
 
 For start/end pickup outputs, select the full video stem and the shorter conditioning stem separately. For example, a repackaged lift with video `Lab/weight/lift01-start-end` used `--scene-id lift01`. The checker printed both resolved paths and 7,084 triangles. A same-name clip needs no override. For a fresh render, first use the [pre-provider check](../gen_2dhoi.md#conditioning-frame-checks).

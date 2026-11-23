@@ -4,7 +4,10 @@
 
 Follow a person climbing the supplied staircase. Fit the human while the stairs stay fixed, transfer the step sequence to the Unitree G1, then simulate a policy following the terrain reference.
 
-![Frame from the supplied stair-climbing video](../_static/examples/stairs.jpg)
+<figure>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/stairs.jpg" aria-label="Bundled source video of the stair climb"><source src="../_static/examples/stairs-input.mp4" type="video/mp4"><img src="../_static/examples/stairs.jpg" alt="Bundled source video of the stair climb"></video>
+<figcaption>Bundled input · 241 frames at 24 fps.</figcaption>
+</figure>
 
 ## Prerequisites
 
@@ -38,14 +41,11 @@ its downloads and this case. Report any unresolved fit or contact."
 ### Expected result
 
 <figure>
-<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/stairs-recon.jpg" aria-label="A stair climb shown in the original video, the fitted camera view, a fixed oblique view and a tread profile.">
-  <source src="../_static/examples/stairs-recon.mp4" type="video/mp4">
-  <img src="../_static/examples/stairs-recon.jpg" alt="A stair climb shown in the original video, the fitted camera view, a fixed oblique view and a tread profile.">
-</video>
-<figcaption>Frames 84–105 show the right foot on tread 2 and the left foot approaching tread 3. Compare the full source frame, camera overlay, fixed oblique view and sole-height profile. The full movie covers the entire climb. Standard release image 1.2.0, RTX 6000 Ada.</figcaption>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/stairs-recon.jpg" aria-label="Source, fitted camera overlay, fixed oblique view and sole-height profile for the whole stair climb"><source src="../_static/examples/stairs-recon.mp4" type="video/mp4"><img src="../_static/examples/stairs-recon.jpg" alt="Source, fitted camera overlay, fixed oblique view and sole-height profile for the whole stair climb"></video>
+<figcaption>Full <code>reconstruction.mp4</code> from the reconstruction step, 241 frames at 24 fps. At frames 84–105, the right foot rests on tread 2 as the left foot approaches tread 3. Release image 1.2.0, RTX 6000 Ada.</figcaption>
 </figure>
 
-Open `reconstruction.mp4` and follow each stance foot in the side view through the whole climb. The excerpt above shows one transition.
+Open `reconstruction.mp4` and follow each stance foot in the side view through the whole climb.
 
 **Continue to G1** if `reconstruction.mp4` plays all 241 frames, the stairs stay fixed and each stance foot lands on the tread shown in the source. If your review reports sole heights, use them to locate frames to inspect in the side view.
 
@@ -75,8 +75,8 @@ Report any unresolved contact."
 ### Expected result
 
 <figure>
-<img class="grail-stage-player" src="../_static/examples/stairs-robot.jpg" alt="Whole G1 climbing with its left foot on the sixth tread, beside the source frame, fixed oblique view and sole profile.">
-<figcaption>Frame 188 of the 241-frame motion. The left foot supports the body on tread 6 while the right leg swings. The bottom panels show the fixed oblique camera and sole geometry. Standard release image 1.2.0, RTX 6000 Ada.</figcaption>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/stairs-robot.jpg" aria-label="G1 stair climb with source, camera overlay, fixed oblique view and sole profile"><source src="../_static/examples/stairs-robot.mp4" type="video/mp4"><img src="../_static/examples/stairs-robot.jpg" alt="G1 stair climb with source, camera overlay, fixed oblique view and sole profile"></video>
+<figcaption>Full <code>retargeting.mp4</code> from the G1 step, 241 frames at 24 fps. At frame 188 the left foot supports the robot on tread 6 while the right leg swings. Release image 1.2.0, RTX 6000 Ada.</figcaption>
 </figure>
 
 Open `robot.npz` and `retargeting.mp4`. The original clip has 241 frames and the G1 terrain target has 36 pose coordinates, including its floating base.
@@ -112,6 +112,11 @@ NUM_ENVS=64 ITERATIONS=4 EVAL_EVERY=4 bash scripts/tracking/terrain_finetune.sh 
 ### Expected result
 
 **Local short run:** 11.8% of the stair reference reached, zero completed climbs, 133.3 mm global joint error. This command produces a saved policy and metrics only. **It produces no rollout video.** See [how to render the trained stair policy](../tracking.md#stair-policy-rollout) on a supported rendering host.
+
+<figure>
+<video class="grail-stage-player" controls playsinline preload="none" poster="../_static/examples/stairs-tracking.jpg" aria-label="Following-camera recording of the final stair policy on the full reference"><source src="../_static/examples/stairs-policy-diagnostic.mp4" type="video/mp4"><img src="../_static/examples/stairs-tracking.jpg" alt="Following-camera recording of the final stair policy on the full reference"></video>
+<figcaption>Full recording from a separate evaluation of the 5,000-update policy, 500 frames at 50 fps. The following camera moves with G1. Production image 1.1.0, one L40S. <a href="../tracking.html#stair-policy-rollout">Rollout command</a>.</figcaption>
+</figure>
 
 Open `tracking/eval/step_000004/metrics_eval.json` and read `eval/success/progress_rate`, `eval/success/success_rate` and `eval/all/mpjpe_g`, respectively. Check that `tracking/train/model_step_000004.pt` exists. A checkpoint plus an evaluation confirms the workflow ran; a progress fraction of 1 means the policy reached the end. Treat the measured values as comparisons rather than exact repeat targets.
 
