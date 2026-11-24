@@ -8,7 +8,7 @@ from openai import OpenAI
 
 DEFAULT_CHAT_MODEL = "gpt-4o"
 DEFAULT_REASONING_MODEL = "gpt-4o"
-DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
+DEFAULT_IMAGE_MODEL = "gpt-image-2.6-sunburst"
 
 _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4")
 
