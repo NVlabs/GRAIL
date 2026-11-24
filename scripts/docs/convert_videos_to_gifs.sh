@@ -28,7 +28,6 @@ declare -A VIDEOS=(
     ["terrain_slopes"]="static/videos/terrain/slope_mesh_009-3347.mp4"
     ["terrain_curbs"]="static/videos/terrain/curb_004-3397.mp4"
     ["terrain_stairs"]="static/videos/terrain/stairs_002__341_stairs_002_stairs_002_jason_rigged_001_indoor1-v13_rand00001-20260306_140248__right-3250.mp4"
-    ["deployment_egocentric_views"]="static/videos/collage_horizontal.mp4"
     ["deployment_pickup"]="static/videos/deployment/pickup/pickup_clip_10.mp4"
     ["deployment_stairs"]="static/videos/deployment/stairs/stair_clip_01.mp4"
     ["realworld"]="static/videos/real_deployment.mp4"
@@ -43,39 +42,56 @@ MAX_DURATION=5
 
 # Empty duration means use the full source clip.
 declare -A MAX_DURATIONS=(
+    ["deployment_egocentric_views"]=""
     ["deployment_pickup"]=""
     ["deployment_stairs"]=""
 )
 
-for name in "${!VIDEOS[@]}"; do
-    rel="${VIDEOS[$name]}"
-    mp4="${TMPDIR}/${name}.mp4"
+fetch_video() {
+    local path="$1" url="$2"
+    if [ ! -f "${path}" ]; then
+        echo "  fetch ${url}"
+        curl -fsSL --output "${path}" "${url}"
+    fi
+}
+
+for name in "${!VIDEOS[@]}" deployment_egocentric_views; do
     gif="${OUT_DIR}/${name}.gif"
-    width="${WIDTH}"
     max_duration="${MAX_DURATIONS[$name]-$MAX_DURATION}"
     duration_args=()
     if [ -n "${max_duration}" ]; then
         duration_args=(-t "${max_duration}")
     fi
-    if [ "${name}" = "deployment_egocentric_views" ]; then
-        width=720
-    fi
 
-    if [ ! -f "${mp4}" ]; then
-        echo "  fetch ${name} ← ${PROJECT_PAGE}/${rel}"
-        curl -fsSL --output "${mp4}" "${PROJECT_PAGE}/${rel}"
+    if [ "${name}" = "deployment_egocentric_views" ]; then
+        inputs=()
+        for clip in sage_a03_grid4k_set1 sage_a03_ego_set1; do
+            mp4="${TMPDIR}/${clip}.mp4"
+            fetch_video "${mp4}" "${PROJECT_PAGE}/static/videos/corl2026/${clip}.mp4"
+            inputs+=(-i "${mp4}")
+        done
+        # Preserve each aspect ratio and sample both panels on the same timeline.
+        panel="setpts=PTS-STARTPTS,fps=${FPS},scale=-2:360:flags=lanczos,setsar=1"
+        filter="[0:v]${panel}[left];[1:v]${panel}[right];[left][right]hstack"
+        palette_input=2
+    else
+        mp4="${TMPDIR}/${name}.mp4"
+        fetch_video "${mp4}" "${PROJECT_PAGE}/${VIDEOS[$name]}"
+        inputs=(-i "${mp4}")
+        filter="[0:v]fps=${FPS},scale=${WIDTH}:-1:flags=lanczos"
+        palette_input=1
     fi
 
     echo "  convert ${name} → ${gif}"
     # Two-pass palette generation; optional trim; small palette.
     palette="${TMPDIR}/${name}_palette.png"
     ffmpeg -y -loglevel error \
-        "${duration_args[@]}" -i "${mp4}" \
-        -vf "fps=${FPS},scale=${width}:-1:flags=lanczos,palettegen=stats_mode=diff:max_colors=64" \
+        "${duration_args[@]}" "${inputs[@]}" \
+        -filter_complex "${filter},palettegen=stats_mode=diff:max_colors=64" \
         "${palette}"
     ffmpeg -y -loglevel error \
-        "${duration_args[@]}" -i "${mp4}" -i "${palette}" \
-        -lavfi "fps=${FPS},scale=${width}:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5" \
+        "${duration_args[@]}" "${inputs[@]}" -i "${palette}" \
+        -filter_complex "${filter}[x];[x][${palette_input}:v]paletteuse=dither=bayer:bayer_scale=5" \
         -loop 0 \
         "${gif}"
     rm -f "${palette}"
